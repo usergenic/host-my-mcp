@@ -1,0 +1,5 @@
+/target
+*.local.yaml
+host-my-mcp.yaml
+.env
+.DS_Store
