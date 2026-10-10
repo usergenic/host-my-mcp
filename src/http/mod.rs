@@ -1,6 +1,8 @@
 //! axum application: one Streamable HTTP MCP endpoint per configured server,
 //! RFC 9728 metadata, health and status.
 
+pub mod cors;
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
@@ -25,6 +27,7 @@ use crate::{
     backend::{Backend, BackendSpec, BackendStatus},
     bridge::{ServerContext, registry::SessionRegistry},
     config::{Config, Start},
+    http::cors::OriginAllowlist,
     policy::StaticPolicy,
 };
 
@@ -64,6 +67,13 @@ impl App {
 /// server cannot keep the others offline.
 pub async fn build_app(config: Config) -> anyhow::Result<App> {
     let cancel = CancellationToken::new();
+    // Validated in Config::parse; the same list drives rmcp's Origin check and CORS.
+    let cors_allowlist = Arc::new(
+        OriginAllowlist::parse(&config.listen.allowed_origins).map_err(anyhow::Error::msg)?,
+    );
+    if !cors_allowlist.is_empty() {
+        tracing::info!(origins = ?config.listen.allowed_origins, "CORS enabled for listed browser origins");
+    }
     let policy = StaticPolicy::from_config(&config);
 
     let validator: Option<Arc<TokenValidator>> = if config.auth.disabled {
@@ -197,6 +207,13 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
         .route("/status", get(status))
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
+    // Outermost so preflights never reach the auth layer (browsers send no
+    // Authorization on OPTIONS) and so 401/403/404 responses carry CORS headers.
+    let router = if cors_allowlist.is_empty() {
+        router
+    } else {
+        router.layer(from_fn_with_state(cors_allowlist, cors::cors))
+    };
 
     Ok(App {
         router,

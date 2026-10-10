@@ -515,3 +515,299 @@ servers:
     // The scoped /locked token is still rejected at /echo.
     assert!(connect(&echo_resource, Some(&scoped)).await.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// CORS for browser clients
+
+fn header(resp: &reqwest::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get_all(name)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .reduce(|a, b| format!("{a}, {b}"))
+}
+
+fn assert_no_cors(resp: &reqwest::Response, what: &str) {
+    for h in [
+        "access-control-allow-origin",
+        "access-control-allow-methods",
+        "access-control-allow-headers",
+        "access-control-expose-headers",
+        "access-control-max-age",
+    ] {
+        assert!(
+            header(resp, h).is_none(),
+            "{what}: unexpected {h}: {:?}",
+            resp.headers()
+        );
+    }
+}
+
+fn assert_vary_origin(resp: &reqwest::Response, what: &str) {
+    let vary = header(resp, "vary").unwrap_or_default();
+    assert!(
+        vary.split(',')
+            .any(|v| v.trim().eq_ignore_ascii_case("origin")),
+        "{what}: Vary must name Origin, got {vary:?}"
+    );
+}
+
+const BROWSER: &str = "http://localhost:5173";
+const STRANGER: &str = "https://evil.example";
+
+#[tokio::test]
+async fn cors_for_allowed_browser_origins() {
+    let jwks = start_jwks_server().await;
+    let gw = start_gateway(|port| {
+        format!(
+            r#"
+listen:
+  host: 127.0.0.1
+  port: {port}
+  allowed_origins: ["{BROWSER}", "http://127.0.0.1:*"]
+public_url: http://127.0.0.1:{port}
+auth:
+  issuer: {ISSUER}
+  jwks_uri: http://{jwks}/jwks.json
+users:
+  brendan:
+    subjects: ["google-oauth2|123"]
+servers:
+  echo:
+    command: "{ECHO_BIN}"
+    allowed_users: [brendan]
+    tools:
+      allow: ["*"]
+"#
+        )
+    })
+    .await;
+    let http = reqwest::Client::new();
+    let echo = gw.url("/echo");
+    let md_url = gw.url("/.well-known/oauth-protected-resource/echo");
+    let init_body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}});
+
+    // Preflight on the server path from an allowed origin: 204, no token needed.
+    let resp = http
+        .request(reqwest::Method::OPTIONS, &echo)
+        .header("origin", BROWSER)
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "authorization, content-type, mcp-session-id",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "{:?}", resp.headers());
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some(BROWSER)
+    );
+    assert_vary_origin(&resp, "preflight");
+    assert_eq!(
+        header(&resp, "access-control-allow-methods").as_deref(),
+        Some("GET, POST, DELETE, OPTIONS")
+    );
+    let allow_headers = header(&resp, "access-control-allow-headers")
+        .unwrap()
+        .to_ascii_lowercase();
+    for h in [
+        "authorization",
+        "content-type",
+        "accept",
+        "mcp-session-id",
+        "mcp-protocol-version",
+        "last-event-id",
+    ] {
+        assert!(
+            allow_headers.contains(h),
+            "allow-headers missing {h}: {allow_headers}"
+        );
+    }
+    assert_eq!(
+        header(&resp, "access-control-max-age").as_deref(),
+        Some("600")
+    );
+    assert!(
+        header(&resp, "www-authenticate").is_none(),
+        "preflight must not be intercepted by auth"
+    );
+
+    // Port wildcard entries work too.
+    let resp = http
+        .request(reqwest::Method::OPTIONS, &echo)
+        .header("origin", "http://127.0.0.1:4242")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some("http://127.0.0.1:4242")
+    );
+
+    // Preflight from an origin that is not listed: no CORS headers at all.
+    let resp = http
+        .request(reqwest::Method::OPTIONS, &echo)
+        .header("origin", STRANGER)
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), 204);
+    assert_no_cors(&resp, "preflight from stranger");
+
+    // Unauthenticated POST from the browser: the 401 challenge is readable cross-origin.
+    let resp = http
+        .post(&echo)
+        .header("origin", BROWSER)
+        .json(&init_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert!(
+        header(&resp, "www-authenticate")
+            .unwrap()
+            .contains("resource_metadata=")
+    );
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some(BROWSER)
+    );
+    assert_vary_origin(&resp, "401");
+    let expose = header(&resp, "access-control-expose-headers")
+        .unwrap()
+        .to_ascii_lowercase();
+    for h in ["www-authenticate", "mcp-session-id", "mcp-protocol-version"] {
+        assert!(expose.contains(h), "expose-headers missing {h}: {expose}");
+    }
+
+    // Protected-resource metadata: GET and preflight both carry CORS headers.
+    let resp = http
+        .get(&md_url)
+        .header("origin", BROWSER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some(BROWSER)
+    );
+    assert_vary_origin(&resp, "metadata");
+    assert!(header(&resp, "access-control-expose-headers").is_some());
+    let md: Value = resp.json().await.unwrap();
+    assert_eq!(md["resource"], echo);
+    let resp = http
+        .request(reqwest::Method::OPTIONS, &md_url)
+        .header("origin", BROWSER)
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some(BROWSER)
+    );
+
+    // Authenticated request from the browser: success response carries CORS headers
+    // and the session id is exposed so the client can read it.
+    let good = mint("google-oauth2|123", &echo, "openid");
+    let resp = http
+        .post(&echo)
+        .header("origin", BROWSER)
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth(&good)
+        .json(&init_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.headers());
+    assert!(header(&resp, "mcp-session-id").is_some());
+    assert_eq!(
+        header(&resp, "access-control-allow-origin").as_deref(),
+        Some(BROWSER)
+    );
+    assert_vary_origin(&resp, "authenticated");
+    assert!(
+        header(&resp, "access-control-expose-headers")
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("mcp-session-id")
+    );
+
+    // Origin validation is still enforced by the transport for unlisted origins,
+    // and the rejection carries no CORS headers.
+    let resp = http
+        .post(&echo)
+        .header("origin", STRANGER)
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth(&good)
+        .json(&init_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_no_cors(&resp, "stranger POST");
+
+    // Requests without an Origin header (non-browser clients) are untouched.
+    let resp = http.get(&md_url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_no_cors(&resp, "no Origin");
+}
+
+#[tokio::test]
+async fn no_cors_headers_without_allowed_origins() {
+    let gw = start_gateway(no_auth_config).await;
+    let http = reqwest::Client::new();
+    let echo = gw.url("/echo");
+    let init_body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}});
+
+    let resp = http
+        .request(reqwest::Method::OPTIONS, &echo)
+        .header("origin", BROWSER)
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), 204);
+    assert_no_cors(&resp, "preflight");
+
+    // Origin validation is off, so the request succeeds, but nothing is exposed to browsers.
+    let resp = http
+        .post(&echo)
+        .header("origin", BROWSER)
+        .header("accept", "application/json, text/event-stream")
+        .json(&init_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_no_cors(&resp, "POST");
+
+    let resp = http
+        .get(gw.url("/.well-known/oauth-protected-resource/echo"))
+        .header("origin", BROWSER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_no_cors(&resp, "metadata");
+}
+
+#[test]
+fn wildcard_cors_origin_is_rejected_by_config() {
+    let yaml = no_auth_config(8080).replace(
+        "listen: { host: 127.0.0.1, port: 8080 }",
+        "listen: { host: 127.0.0.1, port: 8080, allowed_origins: [\"*\"] }",
+    );
+    let err = Config::parse(&yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("listen.allowed_origins") && err.contains("`*` is not accepted"),
+        "{err}"
+    );
+}

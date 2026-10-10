@@ -6,7 +6,9 @@ listen:
   host: 127.0.0.1          # bind address; Zo's public service forwards to this port
   port: 8080
   # allowed_hosts: ["mcp-ph.zocomputer.io"]   # extra Host header values; ["*"] disables the check
-  # allowed_origins: ["https://app.example.com:*"]
+  # Browser origins; also the CORS allowlist (empty = no Origin check, no CORS headers).
+  # `scheme://host`, `scheme://host:port` or `scheme://host:*`; "*" is rejected.
+  # allowed_origins: ["http://localhost:5173", "https://app.example.com"]
 
 # The public origin MCP clients use. No path, no trailing slash.
 public_url: https://mcp-ph.zocomputer.io

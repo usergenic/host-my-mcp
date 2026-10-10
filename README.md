@@ -100,6 +100,41 @@ servers:
       deny: ["docs_delete"]
 ```
 
+### Listen keys
+
+| key | default | meaning |
+| --- | --- | --- |
+| `host`, `port` | `127.0.0.1`, `8080` | bind address |
+| `allowed_hosts` | `[]` | extra `Host` header values to accept (the `public_url` host, loopback and `host` are always accepted); `["*"]` disables the check |
+| `allowed_origins` | `[]` | browser origins, `scheme://host`, `scheme://host:port` or `scheme://host:*` (any port). Doubles as the **CORS allowlist**: listed origins get preflight answers and CORS headers, unlisted origins get neither and are rejected with 403. Empty = no Origin validation **and no CORS headers**. `"*"` and `"null"` are rejected at startup |
+
+### Browser clients
+
+The gateway is a bearer-token API, so it never answers `Access-Control-Allow-Origin: *`.
+To let a web app (for example a Vite dev server on `http://localhost:5173`, or
+your deployed app) connect with the MCP SDK's browser client and OAuth, list its
+origin:
+
+```yaml
+listen:
+  allowed_origins: ["http://localhost:5173", "https://app.example.com"]
+```
+
+For each listed origin the gateway answers `OPTIONS` preflights on every mount
+and on `/.well-known/oauth-protected-resource/<path>` with `204` and
+`Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`,
+`Access-Control-Allow-Headers: Authorization, Content-Type, Accept,
+Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID`, `Access-Control-Max-Age: 600`,
+without requiring a token (browsers never send `Authorization` on a preflight).
+Actual responses, including the `401` challenge and the metadata document,
+carry `Access-Control-Allow-Origin: <origin>`, `Vary: Origin` and
+`Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id,
+Mcp-Protocol-Version`, so the browser can read the challenge, run discovery,
+DCR/CIMD and PKCE against Auth0, and keep the MCP session id. Origins not on the
+list receive no CORS headers at all. Native and CLI clients send no `Origin` and
+are unaffected. Use `http://localhost:*` to accept any port on localhost during
+development.
+
 ### Server keys
 
 | key | default | meaning |
@@ -333,12 +368,16 @@ release binary built with `cargo build --release`), then:
 The gateway validates the `Host` header (DNS-rebinding protection). It accepts
 the `public_url` host, loopback, and `listen.host`. If Zo's proxy rewrites
 `Host` to something else, add it to `listen.allowed_hosts`, or set
-`["*"]` to disable the check when you trust the proxy.
+`["*"]` to disable the check when you trust the proxy. Browser apps need their
+origins in `listen.allowed_origins` (see [Browser clients](#browser-clients));
+the proxy must forward `OPTIONS` requests unchanged.
 
 ## How requests are authorized
 
 Every HTTP request to a mount (POST, GET for the SSE stream, DELETE) goes
-through the same gate, in order, failing closed:
+through the same gate, in order, failing closed (CORS preflights from a listed
+origin are answered before the gate, carry nothing but CORS headers, and never
+reach a backend):
 
 1. **Bearer token present?** No → `401` with
    `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/<path>", scope="…"`.
@@ -422,7 +461,9 @@ cargo clippy --all-targets
 The end-to-end tests cover the unauthenticated bridge, per-session progress
 routing with two concurrent clients, crash → restart → budget exhaustion, and
 the OAuth surface (challenge header, metadata document, wrong audience,
-unknown identity, missing scope, happy path).
+unknown identity, missing scope, happy path), and CORS for browser clients
+(preflight, cross-origin-readable 401 challenge and metadata, unlisted origins
+and empty allowlists get no CORS headers).
 
 ## License
 

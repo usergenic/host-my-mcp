@@ -57,7 +57,11 @@ pub struct Listen {
     /// always accepted). Use `["*"]` to disable Host validation entirely.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
-    /// Browser `Origin` values to accept. Empty disables Origin validation.
+    /// Browser origins to accept, as `scheme://host`, `scheme://host:port` or
+    /// `scheme://host:*` (any port). Doubles as the CORS allowlist: listed
+    /// origins get preflight answers and CORS headers, others get neither.
+    /// Empty disables Origin validation and emits no CORS headers. `*` and
+    /// `null` are rejected (bearer-token API).
     #[serde(default)]
     pub allowed_origins: Vec<String>,
 }
@@ -390,6 +394,9 @@ impl Config {
             }
         }
 
+        crate::http::cors::OriginAllowlist::parse(&self.listen.allowed_origins)
+            .map_err(|e| ConfigError::Invalid(format!("listen.allowed_origins: {e}")))?;
+
         if self.servers.is_empty() {
             return Err(ConfigError::Invalid(
                 "at least one server must be configured".into(),
@@ -640,6 +647,28 @@ servers:
         assert!(normalize_path("/").is_none());
         assert!(normalize_path("omg").is_none());
         assert!(normalize_path("/../x").is_none());
+    }
+
+    #[test]
+    fn allowed_origins_validated() {
+        let ok = MINIMAL.replace(
+            "public_url:",
+            "listen:\n  allowed_origins: [\"http://localhost:5173\", \"https://app.example.com\", \"http://127.0.0.1:*\"]\npublic_url:",
+        );
+        assert!(Config::parse(&ok).is_ok());
+        for bad in [
+            "\"*\"",
+            "null",
+            "localhost:5173",
+            "\"https://app.example.com/path\"",
+        ] {
+            let yaml = MINIMAL.replace(
+                "public_url:",
+                &format!("listen:\n  allowed_origins: [{bad}]\npublic_url:"),
+            );
+            let err = Config::parse(&yaml).unwrap_err().to_string();
+            assert!(err.contains("listen.allowed_origins"), "{bad}: {err}");
+        }
     }
 
     #[test]
