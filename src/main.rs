@@ -5,10 +5,20 @@ use host_my_mcp::{Config, config::LogFormat};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "host-my-mcp", version, about = "One OAuth-protected MCP gateway in front of your local stdio MCP servers")]
+#[command(
+    name = "host-my-mcp",
+    version,
+    about = "One OAuth-protected MCP gateway in front of your local stdio MCP servers"
+)]
 struct Cli {
     /// Path to the YAML configuration file.
-    #[arg(short, long, global = true, env = "HOST_MY_MCP_CONFIG", default_value = "host-my-mcp.yaml")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "HOST_MY_MCP_CONFIG",
+        default_value = "host-my-mcp.yaml"
+    )]
     config: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
@@ -25,11 +35,16 @@ enum Command {
 }
 
 fn init_logging(cfg: &Config) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.logging.level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.logging.level));
     let registry = tracing_subscriber::registry().with(filter);
     match cfg.logging.format {
-        LogFormat::Json => registry.with(tracing_subscriber::fmt::layer().json().with_target(true)).init(),
-        LogFormat::Text => registry.with(tracing_subscriber::fmt::layer().with_target(true)).init(),
+        LogFormat::Json => registry
+            .with(tracing_subscriber::fmt::layer().json().with_target(true))
+            .init(),
+        LogFormat::Text => registry
+            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .init(),
     }
 }
 
@@ -50,7 +65,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Check => {
             println!("config OK: {}", cli.config.display());
             println!("public_url: {}", config.public_origin());
-            println!("auth: {}", if config.auth.disabled { "DISABLED".to_string() } else { format!("issuer {}", config.auth.issuer.as_ref().unwrap()) });
+            println!(
+                "auth: {}",
+                if config.auth.disabled {
+                    "DISABLED".to_string()
+                } else {
+                    format!("issuer {}", config.auth.issuer.as_ref().unwrap())
+                }
+            );
             for (name, s) in &config.servers {
                 println!(
                     "  {name}: {} -> {} {} (resource {}, lifecycle {:?}, users {:?})",
@@ -68,7 +90,10 @@ async fn main() -> anyhow::Result<()> {
             let origin = config.public_origin();
             for (name, s) in &config.servers {
                 let md = host_my_mcp::auth::ProtectedResourceMetadata::for_server(&config, name, s);
-                println!("# {}", host_my_mcp::auth::metadata::metadata_url(&origin, s.path()));
+                println!(
+                    "# {}",
+                    host_my_mcp::auth::metadata::metadata_url(&origin, s.path())
+                );
                 println!("{}", serde_json::to_string_pretty(&md)?);
             }
             Ok(())

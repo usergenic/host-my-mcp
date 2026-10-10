@@ -18,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    auth::{AuthLayerState, JwksCache, ProtectedResourceMetadata, TokenValidator, metadata::metadata_url, require_auth},
+    auth::{
+        AuthLayerState, JwksCache, ProtectedResourceMetadata, TokenValidator,
+        metadata::metadata_url, require_auth,
+    },
     backend::{Backend, BackendSpec, BackendStatus},
     bridge::{ServerContext, registry::SessionRegistry},
     config::{Config, Start},
@@ -41,7 +44,11 @@ pub struct App {
 
 impl App {
     pub fn backends(&self) -> Vec<Arc<Backend>> {
-        self.state.servers.iter().map(|s| s.shared_backend.clone()).collect()
+        self.state
+            .servers
+            .iter()
+            .map(|s| s.shared_backend.clone())
+            .collect()
     }
 
     pub fn shutdown(&self) {
@@ -60,10 +67,15 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
     let policy = StaticPolicy::from_config(&config);
 
     let validator: Option<Arc<TokenValidator>> = if config.auth.disabled {
-        tracing::warn!("AUTHENTICATION IS DISABLED (auth.disabled: true); every request is anonymous");
+        tracing::warn!(
+            "AUTHENTICATION IS DISABLED (auth.disabled: true); every request is anonymous"
+        );
         None
     } else {
-        let jwks_uri = config.auth.jwks_uri().ok_or_else(|| anyhow::anyhow!("cannot derive jwks_uri from issuer"))?;
+        let jwks_uri = config
+            .auth
+            .jwks_uri()
+            .ok_or_else(|| anyhow::anyhow!("cannot derive jwks_uri from issuer"))?;
         let cache = JwksCache::new(
             jwks_uri.clone(),
             Duration::from_secs(config.auth.jwks_min_refresh_secs),
@@ -71,16 +83,26 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
         );
         match cache.warm().await {
             Ok(n) => tracing::info!(%jwks_uri, keys = n, "loaded signing keys"),
-            Err(e) => tracing::warn!(%jwks_uri, error = %e, "could not load signing keys at startup; will retry on first request (requests fail closed until then)"),
+            Err(e) => {
+                tracing::warn!(%jwks_uri, error = %e, "could not load signing keys at startup; will retry on first request (requests fail closed until then)")
+            }
         }
         Some(Arc::new(TokenValidator::new(&config.auth, cache)?))
     };
 
     let public_origin = config.public_origin();
-    let public_host = config.public_url.host_str().unwrap_or("localhost").to_string();
+    let public_host = config
+        .public_url
+        .host_str()
+        .unwrap_or("localhost")
+        .to_string();
     let mut allowed_hosts: Vec<String> = vec![
         public_host.clone(),
-        format!("{}:{}", public_host, config.public_url.port_or_known_default().unwrap_or(443)),
+        format!(
+            "{}:{}",
+            public_host,
+            config.public_url.port_or_known_default().unwrap_or(443)
+        ),
         "localhost".into(),
         format!("localhost:{}", config.listen.port),
         "127.0.0.1".into(),
@@ -103,8 +125,12 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
         let backend = Backend::new(spec, registry);
         if server.start == Start::Eager {
             match backend.info().await {
-                Ok(i) => tracing::info!(server = %name, protocol = %i.protocol_version, "eager backend started"),
-                Err(e) => tracing::error!(server = %name, error = %e, "eager backend failed to start; will retry lazily"),
+                Ok(i) => {
+                    tracing::info!(server = %name, protocol = %i.protocol_version, "eager backend started")
+                }
+                Err(e) => {
+                    tracing::error!(server = %name, error = %e, "eager backend failed to start; will retry lazily")
+                }
             }
         }
 
@@ -117,8 +143,13 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
             shared_backend: backend,
         });
 
-        let mut http_cfg = StreamableHttpServerConfig::default().with_cancellation_token(cancel.child_token());
-        http_cfg = if disable_host_check { http_cfg.disable_allowed_hosts() } else { http_cfg.with_allowed_hosts(allowed_hosts.clone()) };
+        let mut http_cfg =
+            StreamableHttpServerConfig::default().with_cancellation_token(cancel.child_token());
+        http_cfg = if disable_host_check {
+            http_cfg.disable_allowed_hosts()
+        } else {
+            http_cfg.with_allowed_hosts(allowed_hosts.clone())
+        };
         if !config.listen.allowed_origins.is_empty() {
             http_cfg = http_cfg.with_allowed_origins(config.listen.allowed_origins.clone());
         }
@@ -144,23 +175,40 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
             .nest_service(&path, service)
             .route_layer(from_fn_with_state(auth_state, require_auth));
         router = router.merge(mount);
-        metadata.insert(path.clone(), ProtectedResourceMetadata::for_server(&config, name, server));
+        metadata.insert(
+            path.clone(),
+            ProtectedResourceMetadata::for_server(&config, name, server),
+        );
         servers.push(ctx);
         tracing::info!(server = %name, path = %path, resource = %server.resource(), lifecycle = ?server.lifecycle, "mounted");
     }
 
-    let state = Arc::new(AppState { config, servers, metadata });
+    let state = Arc::new(AppState {
+        config,
+        servers,
+        metadata,
+    });
     let router = router
-        .route("/.well-known/oauth-protected-resource/{*path}", get(protected_resource_metadata))
+        .route(
+            "/.well-known/oauth-protected-resource/{*path}",
+            get(protected_resource_metadata),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .route("/status", get(status))
         .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
-    Ok(App { router, state, cancel })
+    Ok(App {
+        router,
+        state,
+        cancel,
+    })
 }
 
-async fn protected_resource_metadata(State(st): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
+async fn protected_resource_metadata(
+    State(st): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Response {
     let key = format!("/{}", path.trim_end_matches('/'));
     match st.metadata.get(&key) {
         Some(md) => {
@@ -171,7 +219,11 @@ async fn protected_resource_metadata(State(st): State<Arc<AppState>>, Path(path)
             );
             resp
         }
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown resource"}))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown resource"})),
+        )
+            .into_response(),
     }
 }
 
@@ -193,7 +245,11 @@ struct ServerStatus {
 async fn status(State(st): State<Arc<AppState>>) -> Json<Status> {
     Json(Status {
         version: env!("CARGO_PKG_VERSION"),
-        auth: if st.config.auth.disabled { "disabled" } else { "oauth" },
+        auth: if st.config.auth.disabled {
+            "disabled"
+        } else {
+            "oauth"
+        },
         servers: st
             .servers
             .iter()
@@ -236,7 +292,8 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
             s.recv().await;
         }
     };

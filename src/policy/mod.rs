@@ -74,10 +74,14 @@ impl Decision {
         matches!(self, Decision::Allow { .. })
     }
     pub fn allow(reason: impl Into<String>) -> Self {
-        Decision::Allow { reason: reason.into() }
+        Decision::Allow {
+            reason: reason.into(),
+        }
     }
     pub fn deny(reason: impl Into<String>) -> Self {
-        Decision::Deny { reason: reason.into() }
+        Decision::Deny {
+            reason: reason.into(),
+        }
     }
     pub fn reason(&self) -> &str {
         match self {
@@ -101,7 +105,10 @@ pub trait Authorizer: Send + Sync + 'static {
 }
 
 pub fn compile_glob(pattern: &str) -> Result<Glob, globset::Error> {
-    GlobBuilder::new(pattern).literal_separator(false).case_insensitive(false).build()
+    GlobBuilder::new(pattern)
+        .literal_separator(false)
+        .case_insensitive(false)
+        .build()
 }
 
 #[derive(Debug, Clone)]
@@ -114,13 +121,25 @@ impl CompiledRules {
     fn compile(rules: &ToolRules) -> Self {
         let c = |v: &Vec<String>| {
             v.iter()
-                .map(|g| (g.clone(), compile_glob(g).expect("validated at config load").compile_matcher()))
+                .map(|g| {
+                    (
+                        g.clone(),
+                        compile_glob(g)
+                            .expect("validated at config load")
+                            .compile_matcher(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
-        Self { allow: c(&rules.allow), deny: c(&rules.deny) }
+        Self {
+            allow: c(&rules.allow),
+            deny: c(&rules.deny),
+        }
     }
     fn first_match<'s>(list: &'s [(String, GlobMatcher)], tool: &str) -> Option<&'s str> {
-        list.iter().find(|(_, m)| m.is_match(tool)).map(|(g, _)| g.as_str())
+        list.iter()
+            .find(|(_, m)| m.is_match(tool))
+            .map(|(g, _)| g.as_str())
     }
 }
 
@@ -148,16 +167,29 @@ impl StaticPolicy {
             .iter()
             .map(|(name, s)| (name.clone(), Self::compile_server(s)))
             .collect();
-        Arc::new(Self { users: cfg.users.clone(), servers, auth_disabled: cfg.auth.disabled })
+        Arc::new(Self {
+            users: cfg.users.clone(),
+            servers,
+            auth_disabled: cfg.auth.disabled,
+        })
     }
 
     fn compile_server(s: &Server) -> ServerPolicy {
         ServerPolicy {
             allow_any_user: s.allowed_users.iter().any(|u| u == "*"),
-            allowed_users: s.allowed_users.iter().filter(|u| *u != "*").cloned().collect(),
+            allowed_users: s
+                .allowed_users
+                .iter()
+                .filter(|u| *u != "*")
+                .cloned()
+                .collect(),
             required_scopes: s.scopes.clone(),
             tools: CompiledRules::compile(&s.tools),
-            user_tools: s.user_tools.iter().map(|(u, r)| (u.clone(), CompiledRules::compile(r))).collect(),
+            user_tools: s
+                .user_tools
+                .iter()
+                .map(|(u, r)| (u.clone(), CompiledRules::compile(r)))
+                .collect(),
         }
     }
 
@@ -185,7 +217,11 @@ impl StaticPolicy {
 impl Authorizer for StaticPolicy {
     fn resolve_user(&self, subject: &str, email: Option<&str>) -> Option<String> {
         // Subjects first (stable), then emails (convenience).
-        if let Some((name, _)) = self.users.iter().find(|(_, u)| u.subjects.iter().any(|s| s == subject)) {
+        if let Some((name, _)) = self
+            .users
+            .iter()
+            .find(|(_, u)| u.subjects.iter().any(|s| s == subject))
+        {
             return Some(name.clone());
         }
         let email = email?;
@@ -215,9 +251,14 @@ impl Authorizer for StaticPolicy {
             return Decision::deny("auth disabled and server does not allow \"*\"");
         }
         match &principal.user {
-            Some(u) if sp.allowed_users.iter().any(|a| a == u) => Decision::allow(format!("user `{u}` is in allowed_users")),
+            Some(u) if sp.allowed_users.iter().any(|a| a == u) => {
+                Decision::allow(format!("user `{u}` is in allowed_users"))
+            }
             Some(u) => Decision::deny(format!("user `{u}` is not in allowed_users")),
-            None => Decision::deny(format!("subject `{}` does not map to a configured user", principal.subject)),
+            None => Decision::deny(format!(
+                "subject `{}` does not map to a configured user",
+                principal.subject
+            )),
         }
     }
 
@@ -234,7 +275,9 @@ impl Authorizer for StaticPolicy {
             ("tools/call", None) => Decision::deny("tools/call without a tool name"),
             // Discovery filtering reuses the tool decision.
             ("tools/list", Some(tool)) => self.tool_decision(sp, ctx.principal, tool),
-            (method, _) => Decision::allow(format!("method `{method}` permitted for server-authorized users")),
+            (method, _) => Decision::allow(format!(
+                "method `{method}` permitted for server-authorized users"
+            )),
         }
     }
 }
@@ -288,15 +331,31 @@ servers:
     }
 
     fn call<'a>(p: &'a Principal, server: &'a str, tool: &'a str) -> RequestContext<'a> {
-        RequestContext { principal: p, server, method: "tools/call", tool: Some(tool), arguments: None }
+        RequestContext {
+            principal: p,
+            server,
+            method: "tools/call",
+            tool: Some(tool),
+            arguments: None,
+        }
     }
 
     #[test]
     fn resolves_users_by_subject_then_email() {
         let p = policy(CFG);
-        assert_eq!(p.resolve_user("google-oauth2|123", None).as_deref(), Some("brendan"));
-        assert_eq!(p.resolve_user("auth0|zzz", Some("brendan@example.com")).as_deref(), Some("brendan"));
-        assert_eq!(p.resolve_user("auth0|zzz", Some("nobody@example.com")), None);
+        assert_eq!(
+            p.resolve_user("google-oauth2|123", None).as_deref(),
+            Some("brendan")
+        );
+        assert_eq!(
+            p.resolve_user("auth0|zzz", Some("brendan@example.com"))
+                .as_deref(),
+            Some("brendan")
+        );
+        assert_eq!(
+            p.resolve_user("auth0|zzz", Some("nobody@example.com")),
+            None
+        );
     }
 
     #[test]
@@ -325,23 +384,44 @@ servers:
         assert!(!p.authorize_server(&stranger, "toggl").is_allowed());
         let scoped = principal(None, &["toggl:use"]);
         assert!(p.authorize_server(&scoped, "toggl").is_allowed());
-        assert!(p.authorize(&call(&scoped, "toggl", "toggl_list_projects")).is_allowed());
-        assert!(!p.authorize(&call(&scoped, "toggl", "toggl_start_timer")).is_allowed());
+        assert!(
+            p.authorize(&call(&scoped, "toggl", "toggl_list_projects"))
+                .is_allowed()
+        );
+        assert!(
+            !p.authorize(&call(&scoped, "toggl", "toggl_start_timer"))
+                .is_allowed()
+        );
     }
 
     #[test]
     fn non_tool_methods_follow_server_decision() {
         let p = policy(CFG);
         let b = principal(Some("brendan"), &[]);
-        let ctx = RequestContext { principal: &b, server: "omg", method: "resources/list", tool: None, arguments: None };
+        let ctx = RequestContext {
+            principal: &b,
+            server: "omg",
+            method: "resources/list",
+            tool: None,
+            arguments: None,
+        };
         assert!(p.authorize(&ctx).is_allowed());
-        let ctx = RequestContext { principal: &b, server: "omg", method: "tools/call", tool: None, arguments: None };
+        let ctx = RequestContext {
+            principal: &b,
+            server: "omg",
+            method: "tools/call",
+            tool: None,
+            arguments: None,
+        };
         assert!(!p.authorize(&ctx).is_allowed());
     }
 
     #[test]
     fn auth_disabled_requires_star() {
-        let yaml = CFG.replace("  issuer: https://tenant.us.auth0.com/\n", "  disabled: true\n");
+        let yaml = CFG.replace(
+            "  issuer: https://tenant.us.auth0.com/\n",
+            "  disabled: true\n",
+        );
         let p = policy(&yaml);
         let anon = Principal::anonymous();
         assert!(!p.authorize_server(&anon, "omg").is_allowed());

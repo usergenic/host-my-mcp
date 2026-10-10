@@ -37,7 +37,13 @@ pub struct AuthLayerState {
 }
 
 impl AuthLayerState {
-    fn challenge(&self, status: StatusCode, error: Option<(&str, &str)>, body_error: &str, detail: &str) -> Response {
+    fn challenge(
+        &self,
+        status: StatusCode,
+        error: Option<(&str, &str)>,
+        body_error: &str,
+        detail: &str,
+    ) -> Response {
         let www = challenge_header(&self.metadata_url, &self.scopes, error);
         let body = serde_json::json!({ "error": body_error, "error_description": detail });
         let mut resp = (status, axum::Json(body)).into_response();
@@ -64,7 +70,11 @@ fn bearer(req: &Request<Body>) -> Result<Option<&str>, ()> {
     Ok(Some(tok))
 }
 
-pub async fn require_auth(State(st): State<Arc<AuthLayerState>>, mut req: Request, next: Next) -> Response {
+pub async fn require_auth(
+    State(st): State<Arc<AuthLayerState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let principal = match &st.validator {
         None => Principal::anonymous(),
         Some(validator) => {
@@ -72,10 +82,21 @@ pub async fn require_auth(State(st): State<Arc<AuthLayerState>>, mut req: Reques
                 Ok(Some(t)) => t.to_string(),
                 Ok(None) => {
                     audit::authn(&st.server, "challenge", None, None, "no bearer token");
-                    return st.challenge(StatusCode::UNAUTHORIZED, None, "unauthorized", "bearer token required");
+                    return st.challenge(
+                        StatusCode::UNAUTHORIZED,
+                        None,
+                        "unauthorized",
+                        "bearer token required",
+                    );
                 }
                 Err(()) => {
-                    audit::authn(&st.server, "reject", None, None, "malformed authorization header");
+                    audit::authn(
+                        &st.server,
+                        "reject",
+                        None,
+                        None,
+                        "malformed authorization header",
+                    );
                     return st.challenge(
                         StatusCode::UNAUTHORIZED,
                         Some(("invalid_request", "malformed Authorization header")),
@@ -110,14 +131,28 @@ pub async fn require_auth(State(st): State<Arc<AuthLayerState>>, mut req: Reques
     };
 
     let mut principal = principal;
-    principal.user = st.policy.resolve_user(&principal.subject, principal.email.as_deref());
+    principal.user = st
+        .policy
+        .resolve_user(&principal.subject, principal.email.as_deref());
 
     match st.policy.authorize_server(&principal, &st.server) {
         Decision::Allow { reason } => {
-            audit::authn(&st.server, "allow", Some(&principal.subject), principal.user.as_deref(), &reason);
+            audit::authn(
+                &st.server,
+                "allow",
+                Some(&principal.subject),
+                principal.user.as_deref(),
+                &reason,
+            );
         }
         Decision::Deny { reason } => {
-            audit::authn(&st.server, "deny", Some(&principal.subject), principal.user.as_deref(), &reason);
+            audit::authn(
+                &st.server,
+                "deny",
+                Some(&principal.subject),
+                principal.user.as_deref(),
+                &reason,
+            );
             let insufficient_scope = reason.starts_with("missing required scope");
             return if insufficient_scope {
                 st.challenge(

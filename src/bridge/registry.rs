@@ -14,11 +14,7 @@ use std::{
     },
 };
 
-use rmcp::{
-    RoleServer,
-    model::ProgressToken,
-    service::Peer,
-};
+use rmcp::{RoleServer, model::ProgressToken, service::Peer};
 
 #[derive(Clone)]
 pub struct ProgressRoute {
@@ -40,12 +36,18 @@ impl SessionRegistry {
 
     pub fn register_session(&self, peer: Peer<RoleServer>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.sessions.write().expect("registry poisoned").insert(id, peer);
+        self.sessions
+            .write()
+            .expect("registry poisoned")
+            .insert(id, peer);
         id
     }
 
     pub fn unregister_session(&self, id: u64) {
-        self.sessions.write().expect("registry poisoned").remove(&id);
+        self.sessions
+            .write()
+            .expect("registry poisoned")
+            .remove(&id);
     }
 
     pub fn session_count(&self) -> usize {
@@ -64,14 +66,24 @@ impl SessionRegistry {
     }
 
     pub fn register_progress(&self, backend_token: ProgressToken, route: ProgressRoute) {
-        self.progress.write().expect("registry poisoned").insert(backend_token, route);
+        self.progress
+            .write()
+            .expect("registry poisoned")
+            .insert(backend_token, route);
     }
 
     pub fn unregister_progress(&self, backend_token: &ProgressToken) {
-        self.progress.write().expect("registry poisoned").remove(backend_token);
+        self.progress
+            .write()
+            .expect("registry poisoned")
+            .remove(backend_token);
     }
 
     pub fn route_progress(&self, backend_token: &ProgressToken) -> Option<ProgressRoute> {
-        self.progress.read().expect("registry poisoned").get(backend_token).cloned()
+        self.progress
+            .read()
+            .expect("registry poisoned")
+            .get(backend_token)
+            .cloned()
     }
 }

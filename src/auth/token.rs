@@ -35,7 +35,10 @@ impl TokenError {
     /// not the client's. Such failures surface as 503, not 401, so clients
     /// do not loop through re-authorization.
     pub fn is_server_side(&self) -> bool {
-        matches!(self, TokenError::Keys(JwksError::Fetch(_)) | TokenError::Keys(JwksError::Invalid(_)))
+        matches!(
+            self,
+            TokenError::Keys(JwksError::Fetch(_)) | TokenError::Keys(JwksError::Invalid(_))
+        )
     }
 }
 
@@ -58,7 +61,10 @@ impl TokenValidator {
         let algorithms = auth
             .algorithms
             .iter()
-            .map(|a| a.parse::<Algorithm>().map_err(|e| anyhow::anyhow!("bad algorithm {a}: {e}")))
+            .map(|a| {
+                a.parse::<Algorithm>()
+                    .map_err(|e| anyhow::anyhow!("bad algorithm {a}: {e}"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             keys,
@@ -95,7 +101,9 @@ impl TokenValidator {
         let claims = data.claims;
 
         if !audience_matches(claims.get("aud"), resource) {
-            return Err(TokenError::WrongAudience(resource.as_str().trim_end_matches('/').to_string()));
+            return Err(TokenError::WrongAudience(
+                resource.as_str().trim_end_matches('/').to_string(),
+            ));
         }
 
         let subject = claims
@@ -104,10 +112,19 @@ impl TokenValidator {
             .filter(|s| !s.is_empty())
             .ok_or(TokenError::MissingSubject)?
             .to_string();
-        let email = claims.get(&self.email_claim).and_then(Value::as_str).map(str::to_string);
+        let email = claims
+            .get(&self.email_claim)
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let scopes = extract_scopes(&claims);
 
-        Ok(Principal { subject, email, user: None, scopes, claims })
+        Ok(Principal {
+            subject,
+            email,
+            user: None,
+            scopes,
+            claims,
+        })
     }
 }
 
@@ -115,7 +132,8 @@ fn normalize_resource(s: &str) -> String {
     let mut s = s.trim().trim_end_matches('/').to_string();
     // Scheme and host are case-insensitive; compare them lowercased.
     if let Ok(u) = Url::parse(&s) {
-        let lower_prefix = format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")).to_lowercase();
+        let lower_prefix =
+            format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")).to_lowercase();
         let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
         s = format!("{lower_prefix}{port}{}", u.path().trim_end_matches('/'));
     }
@@ -128,7 +146,10 @@ pub fn audience_matches(aud: Option<&Value>, resource: &Url) -> bool {
     let want = normalize_resource(resource.as_str());
     match aud {
         Some(Value::String(s)) => normalize_resource(s) == want,
-        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).any(|s| normalize_resource(s) == want),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|s| normalize_resource(s) == want),
         _ => false,
     }
 }
@@ -166,7 +187,12 @@ pub(crate) mod tests {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(kid.into());
         header.typ = Some("at+jwt".into());
-        encode(&header, &claims, &EncodingKey::from_rsa_pem(PRIVATE_PEM.as_bytes()).unwrap()).unwrap()
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(PRIVATE_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap()
     }
 
     pub fn auth_cfg() -> Auth {
@@ -212,20 +238,35 @@ pub(crate) mod tests {
         let res: Url = "https://mcp.example.com/echo".parse().unwrap();
 
         let other = sign(good_claims("https://mcp.example.com/toggl"), "test-key-1");
-        assert!(matches!(v.validate(&other, &res).await, Err(TokenError::WrongAudience(_))));
+        assert!(matches!(
+            v.validate(&other, &res).await,
+            Err(TokenError::WrongAudience(_))
+        ));
 
         let mut c = good_claims("https://mcp.example.com/echo");
         c["exp"] = json!(now() - 600);
-        assert!(matches!(v.validate(&sign(c, "test-key-1"), &res).await, Err(TokenError::Invalid(_))));
+        assert!(matches!(
+            v.validate(&sign(c, "test-key-1"), &res).await,
+            Err(TokenError::Invalid(_))
+        ));
 
         let mut c = good_claims("https://mcp.example.com/echo");
         c["iss"] = json!("https://evil.example.com/");
-        assert!(matches!(v.validate(&sign(c, "test-key-1"), &res).await, Err(TokenError::Invalid(_))));
+        assert!(matches!(
+            v.validate(&sign(c, "test-key-1"), &res).await,
+            Err(TokenError::Invalid(_))
+        ));
 
         let unknown = sign(good_claims("https://mcp.example.com/echo"), "nope");
-        assert!(matches!(v.validate(&unknown, &res).await, Err(TokenError::Keys(JwksError::UnknownKid(_)))));
+        assert!(matches!(
+            v.validate(&unknown, &res).await,
+            Err(TokenError::Keys(JwksError::UnknownKid(_)))
+        ));
 
-        assert!(matches!(v.validate("not.a.jwt", &res).await, Err(TokenError::Malformed(_))));
+        assert!(matches!(
+            v.validate("not.a.jwt", &res).await,
+            Err(TokenError::Malformed(_))
+        ));
     }
 
     #[tokio::test]
@@ -234,17 +275,37 @@ pub(crate) mod tests {
         let res: Url = "https://mcp.example.com/echo".parse().unwrap();
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some("test-key-1".into());
-        let tok = encode(&header, &good_claims("https://mcp.example.com/echo"), &EncodingKey::from_secret(b"x")).unwrap();
-        assert!(matches!(v.validate(&tok, &res).await, Err(TokenError::UnsupportedAlgorithm(_))));
+        let tok = encode(
+            &header,
+            &good_claims("https://mcp.example.com/echo"),
+            &EncodingKey::from_secret(b"x"),
+        )
+        .unwrap();
+        assert!(matches!(
+            v.validate(&tok, &res).await,
+            Err(TokenError::UnsupportedAlgorithm(_))
+        ));
     }
 
     #[test]
     fn audience_normalization() {
         let r: Url = "https://MCP.example.com/echo".parse().unwrap();
-        assert!(audience_matches(Some(&json!("https://mcp.example.com/echo/")), &r));
-        assert!(audience_matches(Some(&json!(["x", "https://mcp.example.com/echo"])), &r));
-        assert!(!audience_matches(Some(&json!("https://mcp.example.com/echo2")), &r));
-        assert!(!audience_matches(Some(&json!("https://mcp.example.com")), &r));
+        assert!(audience_matches(
+            Some(&json!("https://mcp.example.com/echo/")),
+            &r
+        ));
+        assert!(audience_matches(
+            Some(&json!(["x", "https://mcp.example.com/echo"])),
+            &r
+        ));
+        assert!(!audience_matches(
+            Some(&json!("https://mcp.example.com/echo2")),
+            &r
+        ));
+        assert!(!audience_matches(
+            Some(&json!("https://mcp.example.com")),
+            &r
+        ));
         assert!(!audience_matches(None, &r));
     }
 }

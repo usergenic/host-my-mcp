@@ -18,13 +18,13 @@ use rmcp::{
     service::{Peer, serve_client_with_ct},
     transport::TokioChildProcess,
 };
-use tokio_util::sync::CancellationToken;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     sync::Mutex,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     bridge::registry::SessionRegistry,
@@ -114,7 +114,12 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(spec: BackendSpec, registry: Arc<SessionRegistry>) -> Arc<Self> {
-        Arc::new(Self { spec, registry, inner: StdMutex::new(Inner::default()), spawn_lock: Mutex::new(()) })
+        Arc::new(Self {
+            spec,
+            registry,
+            inner: StdMutex::new(Inner::default()),
+            spawn_lock: Mutex::new(()),
+        })
     }
 
     pub fn name(&self) -> &str {
@@ -237,10 +242,13 @@ impl Backend {
 
         let handler = BackendClient::new(name.clone(), self.registry.clone());
         let ct = CancellationToken::new();
-        let running = tokio::time::timeout(self.spec.init_timeout, serve_client_with_ct(handler, process, ct.clone()))
-            .await
-            .map_err(|_| BackendError::InitializeTimeout(name.clone()))?
-            .map_err(|e| BackendError::Initialize(name.clone(), e.to_string()))?;
+        let running = tokio::time::timeout(
+            self.spec.init_timeout,
+            serve_client_with_ct(handler, process, ct.clone()),
+        )
+        .await
+        .map_err(|_| BackendError::InitializeTimeout(name.clone()))?
+        .map_err(|e| BackendError::Initialize(name.clone(), e.to_string()))?;
 
         let peer = running.peer().clone();
         let info = peer
@@ -264,22 +272,35 @@ impl Backend {
             };
             tracing::warn!(backend = %this.spec.name, pid, generation, reason = %reason, "backend exited");
             let mut inner = this.inner.lock().expect("backend state poisoned");
-            if inner.running.as_ref().is_some_and(|r| r.generation == generation) {
+            if inner
+                .running
+                .as_ref()
+                .is_some_and(|r| r.generation == generation)
+            {
                 inner.running = None;
             }
             inner.last_exit = Some(reason);
         });
 
-        Ok(Running { generation, peer, ct, info, pid, started_at: Instant::now() })
+        Ok(Running {
+            generation,
+            peer,
+            ct,
+            info,
+            pid,
+            started_at: Instant::now(),
+        })
     }
 
     pub fn status(&self) -> BackendStatus {
         let inner = self.inner.lock().expect("backend state poisoned");
         let now = Instant::now();
         let (state, pid, uptime) = match &inner.running {
-            Some(r) if !r.peer.is_transport_closed() && !r.ct.is_cancelled() => {
-                ("running", r.pid, Some(now.duration_since(r.started_at).as_secs()))
-            }
+            Some(r) if !r.peer.is_transport_closed() && !r.ct.is_cancelled() => (
+                "running",
+                r.pid,
+                Some(now.duration_since(r.started_at).as_secs()),
+            ),
             _ if inner.failed_until.is_some_and(|u| now < u) => ("failed", None, None),
             _ => ("stopped", None, None),
         };
@@ -296,7 +317,12 @@ impl Backend {
 
     /// Stop the child. Safe to call from `Drop` (no await).
     pub fn shutdown(&self) {
-        let running = self.inner.lock().expect("backend state poisoned").running.take();
+        let running = self
+            .inner
+            .lock()
+            .expect("backend state poisoned")
+            .running
+            .take();
         if let Some(r) = running {
             tracing::info!(backend = %self.spec.name, pid = r.pid, "stopping backend");
             r.ct.cancel();

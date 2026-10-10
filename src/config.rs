@@ -359,31 +359,50 @@ impl Config {
         }
 
         if !self.auth.disabled {
-            let issuer = self
-                .auth
-                .issuer
-                .as_ref()
-                .ok_or_else(|| ConfigError::Invalid("auth.issuer is required unless auth.disabled is true".into()))?;
+            let issuer = self.auth.issuer.as_ref().ok_or_else(|| {
+                ConfigError::Invalid("auth.issuer is required unless auth.disabled is true".into())
+            })?;
             if issuer.scheme() != "https" {
                 return Err(ConfigError::Invalid("auth.issuer must use https".into()));
             }
             if self.auth.algorithms.is_empty() {
-                return Err(ConfigError::Invalid("auth.algorithms must not be empty".into()));
+                return Err(ConfigError::Invalid(
+                    "auth.algorithms must not be empty".into(),
+                ));
             }
             for alg in &self.auth.algorithms {
-                if !matches!(alg.as_str(), "RS256" | "RS384" | "RS512" | "PS256" | "PS384" | "PS512" | "ES256" | "ES384" | "EdDSA") {
-                    return Err(ConfigError::Invalid(format!("unsupported auth algorithm `{alg}` (asymmetric algorithms only)")));
+                if !matches!(
+                    alg.as_str(),
+                    "RS256"
+                        | "RS384"
+                        | "RS512"
+                        | "PS256"
+                        | "PS384"
+                        | "PS512"
+                        | "ES256"
+                        | "ES384"
+                        | "EdDSA"
+                ) {
+                    return Err(ConfigError::Invalid(format!(
+                        "unsupported auth algorithm `{alg}` (asymmetric algorithms only)"
+                    )));
                 }
             }
         }
 
         if self.servers.is_empty() {
-            return Err(ConfigError::Invalid("at least one server must be configured".into()));
+            return Err(ConfigError::Invalid(
+                "at least one server must be configured".into(),
+            ));
         }
 
         let mut seen_paths = std::collections::BTreeSet::new();
         for (name, server) in self.servers.iter_mut() {
-            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') || name.is_empty() {
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                || name.is_empty()
+            {
                 return Err(ConfigError::Invalid(format!(
                     "server name `{name}` must be non-empty and contain only [A-Za-z0-9_-]"
                 )));
@@ -393,10 +412,14 @@ impl Config {
                 ConfigError::Invalid(format!("server `{name}`: path `{path}` must start with `/`, must not be `/`, and must not contain `..`, `?`, `#`, or whitespace"))
             })?;
             if path.starts_with("/.well-known") || path == "/healthz" || path == "/status" {
-                return Err(ConfigError::Invalid(format!("server `{name}`: path `{path}` is reserved")));
+                return Err(ConfigError::Invalid(format!(
+                    "server `{name}`: path `{path}` is reserved"
+                )));
             }
             if !seen_paths.insert(path.clone()) {
-                return Err(ConfigError::Invalid(format!("server `{name}`: path `{path}` is used by another server")));
+                return Err(ConfigError::Invalid(format!(
+                    "server `{name}`: path `{path}` is used by another server"
+                )));
             }
             server.path = Some(path.clone());
 
@@ -406,19 +429,27 @@ impl Config {
                 server.resource = Some(r);
             }
             if server.command.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!("server `{name}`: command must not be empty")));
+                return Err(ConfigError::Invalid(format!(
+                    "server `{name}`: command must not be empty"
+                )));
             }
             if server.request_timeout_secs == 0 {
-                return Err(ConfigError::Invalid(format!("server `{name}`: request_timeout_secs must be > 0")));
+                return Err(ConfigError::Invalid(format!(
+                    "server `{name}`: request_timeout_secs must be > 0"
+                )));
             }
             for u in &server.allowed_users {
                 if u != "*" && !self.users.contains_key(u) {
-                    return Err(ConfigError::Invalid(format!("server `{name}`: allowed_users entry `{u}` is not defined under `users`")));
+                    return Err(ConfigError::Invalid(format!(
+                        "server `{name}`: allowed_users entry `{u}` is not defined under `users`"
+                    )));
                 }
             }
             for u in server.user_tools.keys() {
                 if !self.users.contains_key(u) {
-                    return Err(ConfigError::Invalid(format!("server `{name}`: user_tools entry `{u}` is not defined under `users`")));
+                    return Err(ConfigError::Invalid(format!(
+                        "server `{name}`: user_tools entry `{u}` is not defined under `users`"
+                    )));
                 }
             }
             if server.allowed_users.is_empty() {
@@ -429,18 +460,26 @@ impl Config {
             }
             // Validate globs early so a typo fails at startup, not at first call.
             for g in server.tools.allow.iter().chain(server.tools.deny.iter()) {
-                crate::policy::compile_glob(g).map_err(|e| ConfigError::Invalid(format!("server `{name}`: bad tool glob `{g}`: {e}")))?;
+                crate::policy::compile_glob(g).map_err(|e| {
+                    ConfigError::Invalid(format!("server `{name}`: bad tool glob `{g}`: {e}"))
+                })?;
             }
             for (u, rules) in &server.user_tools {
                 for g in rules.allow.iter().chain(rules.deny.iter()) {
-                    crate::policy::compile_glob(g).map_err(|e| ConfigError::Invalid(format!("server `{name}` user `{u}`: bad tool glob `{g}`: {e}")))?;
+                    crate::policy::compile_glob(g).map_err(|e| {
+                        ConfigError::Invalid(format!(
+                            "server `{name}` user `{u}`: bad tool glob `{g}`: {e}"
+                        ))
+                    })?;
                 }
             }
         }
 
         for (name, user) in &self.users {
             if user.subjects.is_empty() && user.emails.is_empty() {
-                return Err(ConfigError::Invalid(format!("user `{name}` has neither subjects nor emails")));
+                return Err(ConfigError::Invalid(format!(
+                    "user `{name}` has neither subjects nor emails"
+                )));
             }
         }
         Ok(())
@@ -463,7 +502,9 @@ impl Server {
 
     /// The OAuth resource identifier; always present after validation.
     pub fn resource(&self) -> &Url {
-        self.resource.as_ref().expect("resource is set during validation")
+        self.resource
+            .as_ref()
+            .expect("resource is set during validation")
     }
 
     pub fn advertised_scopes<'a>(&'a self, auth: &'a Auth) -> &'a [String] {
@@ -483,7 +524,8 @@ fn normalize_path(p: &str) -> Option<String> {
     if !p.starts_with('/') || p == "/" {
         return None;
     }
-    if p.contains("..") || p.contains('?') || p.contains('#') || p.chars().any(char::is_whitespace) {
+    if p.contains("..") || p.contains('?') || p.contains('#') || p.chars().any(char::is_whitespace)
+    {
         return None;
     }
     let trimmed = p.trim_end_matches('/');
@@ -494,8 +536,12 @@ fn normalize_path(p: &str) -> Option<String> {
 }
 
 /// Replace `${NAME}` and `${NAME:-default}` with environment values.
-pub fn substitute_env(input: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<String, ConfigError> {
-    let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").expect("static regex");
+pub fn substitute_env(
+    input: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String, ConfigError> {
+    let re =
+        regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").expect("static regex");
     let mut out = String::with_capacity(input.len());
     let mut last = 0;
     for cap in re.captures_iter(input) {
@@ -540,7 +586,10 @@ servers:
         let s = &cfg.servers["echo"];
         assert_eq!(s.path(), "/echo");
         assert_eq!(s.resource().as_str(), "https://mcp.example.com/echo");
-        assert_eq!(cfg.auth.jwks_uri().unwrap().as_str(), "https://tenant.us.auth0.com/.well-known/jwks.json");
+        assert_eq!(
+            cfg.auth.jwks_uri().unwrap().as_str(),
+            "https://tenant.us.auth0.com/.well-known/jwks.json"
+        );
         assert_eq!(cfg.listen.port, 8080);
         assert_eq!(s.lifecycle, Lifecycle::Shared);
         assert!(s.filter_tool_list);
@@ -554,7 +603,10 @@ servers:
         })
         .unwrap();
         assert_eq!(out, "a=1 b=dflt c=");
-        assert!(matches!(substitute_env("${NOPE}", |_| None), Err(ConfigError::MissingEnv(_))));
+        assert!(matches!(
+            substitute_env("${NOPE}", |_| None),
+            Err(ConfigError::MissingEnv(_))
+        ));
     }
 
     #[test]
@@ -574,7 +626,10 @@ servers:
         assert!(Config::parse(&bad).is_err());
         let bad = MINIMAL.replace("  issuer: https://tenant.us.auth0.com/\n", "");
         assert!(Config::parse(&bad).is_err());
-        let ok = MINIMAL.replace("  issuer: https://tenant.us.auth0.com/\n", "  disabled: true\n");
+        let ok = MINIMAL.replace(
+            "  issuer: https://tenant.us.auth0.com/\n",
+            "  disabled: true\n",
+        );
         assert!(Config::parse(&ok).is_ok());
     }
 

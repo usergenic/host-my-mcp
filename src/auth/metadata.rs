@@ -35,7 +35,10 @@ impl ProtectedResourceMetadata {
 /// `https://<public>/.well-known/oauth-protected-resource<path>` per RFC 9728 §3
 /// path insertion.
 pub fn metadata_url(public_origin: &str, path: &str) -> Url {
-    Url::parse(&format!("{public_origin}/.well-known/oauth-protected-resource{path}")).expect("validated origin and path")
+    Url::parse(&format!(
+        "{public_origin}/.well-known/oauth-protected-resource{path}"
+    ))
+    .expect("validated origin and path")
 }
 
 /// Build a `WWW-Authenticate: Bearer ...` value.
@@ -43,7 +46,11 @@ pub fn metadata_url(public_origin: &str, path: &str) -> Url {
 /// * no token: `Bearer resource_metadata="...", scope="..."`
 /// * bad token: adds `error="invalid_token", error_description="..."`
 /// * insufficient scope: `error="insufficient_scope"`
-pub fn challenge_header(metadata_url: &Url, scopes: &[String], error: Option<(&str, &str)>) -> String {
+pub fn challenge_header(
+    metadata_url: &Url,
+    scopes: &[String],
+    error: Option<(&str, &str)>,
+) -> String {
     let mut parts = vec![format!("resource_metadata=\"{metadata_url}\"")];
     if let Some((code, desc)) = error {
         parts.push(format!("error=\"{code}\""));
@@ -58,7 +65,9 @@ pub fn challenge_header(metadata_url: &Url, scopes: &[String], error: Option<(&s
 }
 
 fn quote(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace(['\r', '\n'], " ")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]
@@ -68,7 +77,10 @@ mod tests {
     #[test]
     fn metadata_url_inserts_path() {
         let u = metadata_url("https://mcp.example.com", "/omg");
-        assert_eq!(u.as_str(), "https://mcp.example.com/.well-known/oauth-protected-resource/omg");
+        assert_eq!(
+            u.as_str(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource/omg"
+        );
     }
 
     #[test]
@@ -78,7 +90,11 @@ mod tests {
             challenge_header(&u, &[], None),
             "Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource/omg\""
         );
-        let h = challenge_header(&u, &["a".into(), "b".into()], Some(("invalid_token", "expired \"now\"")));
+        let h = challenge_header(
+            &u,
+            &["a".into(), "b".into()],
+            Some(("invalid_token", "expired \"now\"")),
+        );
         assert!(h.contains("error=\"invalid_token\""));
         assert!(h.contains("error_description=\"expired \\\"now\\\"\""));
         assert!(h.ends_with("scope=\"a b\""));

@@ -51,10 +51,15 @@ impl ClientHandler for BackendClient {
         cfg
     }
 
-    async fn on_progress(&self, params: ProgressNotificationParam, _ctx: NotificationContext<RoleClient>) {
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _ctx: NotificationContext<RoleClient>,
+    ) {
         match self.registry.route_progress(&params.progress_token) {
             Some(route) => {
-                let mut forwarded = ProgressNotificationParam::new(route.client_token, params.progress);
+                let mut forwarded =
+                    ProgressNotificationParam::new(route.client_token, params.progress);
                 forwarded.total = params.total;
                 forwarded.message = params.message;
                 forwarded.meta = params.meta;
@@ -67,23 +72,36 @@ impl ClientHandler for BackendClient {
     }
 
     async fn on_tool_list_changed(&self, _ctx: NotificationContext<RoleClient>) {
-        fan_out!(self, "tools/list_changed", |peer| peer.notify_tool_list_changed());
+        fan_out!(self, "tools/list_changed", |peer| peer
+            .notify_tool_list_changed());
     }
 
     async fn on_prompt_list_changed(&self, _ctx: NotificationContext<RoleClient>) {
-        fan_out!(self, "prompts/list_changed", |peer| peer.notify_prompt_list_changed());
+        fan_out!(self, "prompts/list_changed", |peer| peer
+            .notify_prompt_list_changed());
     }
 
     async fn on_resource_list_changed(&self, _ctx: NotificationContext<RoleClient>) {
-        fan_out!(self, "resources/list_changed", |peer| peer.notify_resource_list_changed());
+        fan_out!(self, "resources/list_changed", |peer| peer
+            .notify_resource_list_changed());
     }
 
-    async fn on_resource_updated(&self, params: ResourceUpdatedNotificationParam, _ctx: NotificationContext<RoleClient>) {
-        fan_out!(self, "resources/updated", |peer| peer.notify_resource_updated(params.clone()));
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _ctx: NotificationContext<RoleClient>,
+    ) {
+        fan_out!(self, "resources/updated", |peer| peer
+            .notify_resource_updated(params.clone()));
     }
 
     #[allow(deprecated)]
-    async fn on_logging_message(&self, params: LoggingMessageNotificationParam, _ctx: NotificationContext<RoleClient>) {
-        fan_out!(self, "logging message", |peer| peer.notify_logging_message(params.clone()));
+    async fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _ctx: NotificationContext<RoleClient>,
+    ) {
+        fan_out!(self, "logging message", |peer| peer
+            .notify_logging_message(params.clone()));
     }
 }

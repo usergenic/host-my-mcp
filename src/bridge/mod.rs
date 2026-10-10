@@ -17,12 +17,11 @@ use rmcp::{
         CallToolRequest, CallToolRequestParams, CallToolResponse, CancelledNotificationParam,
         ClientRequest, CompleteRequest, CompleteRequestParams, CompleteResult, ErrorCode,
         GetPromptRequest, GetPromptRequestParams, GetPromptResponse, Implementation,
-        InitializeRequestParams, InitializeResult, ListPromptsResult,
-        ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, ReadResourceRequest, ReadResourceRequestParams, ReadResourceResponse,
-        RequestOptionalParam, ServerResult, SetLevelRequest, SetLevelRequestParams,
-        SubscribeRequest, SubscribeRequestParams, UnsubscribeRequest, UnsubscribeRequestParams,
+        InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+        ReadResourceRequest, ReadResourceRequestParams, ReadResourceResponse, RequestOptionalParam,
+        ServerResult, SetLevelRequest, SetLevelRequestParams, SubscribeRequest,
+        SubscribeRequestParams, UnsubscribeRequest, UnsubscribeRequestParams,
     },
     service::{NotificationContext, PeerRequestOptions, RequestContext, ServiceError},
 };
@@ -56,7 +55,11 @@ impl ServerContext {
                 Backend::new(self.shared_backend.spec().clone(), registry)
             }
         };
-        GatewayHandler { ctx: self.clone(), backend, session_id: OnceLock::new() }
+        GatewayHandler {
+            ctx: self.clone(),
+            backend,
+            session_id: OnceLock::new(),
+        }
     }
 }
 
@@ -87,12 +90,17 @@ fn service_error(e: ServiceError) -> McpError {
     match e {
         // The backend answered with a JSON-RPC error: pass it through verbatim.
         ServiceError::McpError(e) => e,
-        ServiceError::Timeout { timeout } => {
-            McpError::new(ErrorCode::INTERNAL_ERROR, format!("backend did not answer within {}s", timeout.as_secs()), None)
-        }
+        ServiceError::Timeout { timeout } => McpError::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("backend did not answer within {}s", timeout.as_secs()),
+            None,
+        ),
         ServiceError::Cancelled { reason } => McpError::new(
             ErrorCode::INTERNAL_ERROR,
-            format!("request cancelled{}", reason.map(|r| format!(": {r}")).unwrap_or_default()),
+            format!(
+                "request cancelled{}",
+                reason.map(|r| format!(": {r}")).unwrap_or_default()
+            ),
             None,
         ),
         ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
@@ -107,7 +115,11 @@ fn service_error(e: ServiceError) -> McpError {
 
 /// Build a request whose params are optional (the `*/list` family).
 fn optional_request<M: Default, P>(params: Option<P>) -> RequestOptionalParam<M, P> {
-    RequestOptionalParam { method: M::default(), params, extensions: Default::default() }
+    RequestOptionalParam {
+        method: M::default(),
+        params,
+        extensions: Default::default(),
+    }
 }
 
 fn cancelled_param(id: rmcp::model::RequestId) -> CancelledNotificationParam {
@@ -142,7 +154,11 @@ impl GatewayHandler {
             None if self.ctx.auth_disabled => Ok(Principal::anonymous()),
             None => {
                 tracing::error!(server = %self.ctx.name, "request reached handler without a principal; failing closed");
-                Err(McpError::new(ErrorCode::INTERNAL_ERROR, "authentication context missing", None))
+                Err(McpError::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    "authentication context missing",
+                    None,
+                ))
             }
         }
     }
@@ -155,7 +171,13 @@ impl GatewayHandler {
         });
     }
 
-    fn authorize(&self, principal: &Principal, method: &str, tool: Option<&str>, args: Option<&rmcp::model::JsonObject>) -> Decision {
+    fn authorize(
+        &self,
+        principal: &Principal,
+        method: &str,
+        tool: Option<&str>,
+        args: Option<&rmcp::model::JsonObject>,
+    ) -> Decision {
         self.ctx.policy.authorize(&PolicyContext {
             principal,
             server: &self.ctx.name,
@@ -180,7 +202,17 @@ impl GatewayHandler {
         let principal = self.principal(&context.extensions)?;
         let decision = self.authorize(&principal, method, None, None);
         if !decision.is_allowed() {
-            audit::request(&self.ctx.name, Some(&principal.subject), principal.user.as_deref(), method, None, &decision, None, None, None);
+            audit::request(
+                &self.ctx.name,
+                Some(&principal.subject),
+                principal.user.as_deref(),
+                method,
+                None,
+                &decision,
+                None,
+                None,
+                None,
+            );
             return Err(denied(decision.reason()));
         }
         let started = Instant::now();
@@ -189,7 +221,8 @@ impl GatewayHandler {
             let handle = peer
                 .send_request_with_option(
                     request,
-                    PeerRequestOptions::with_timeout(self.backend.spec().request_timeout).reset_timeout_on_progress(),
+                    PeerRequestOptions::with_timeout(self.backend.spec().request_timeout)
+                        .reset_timeout_on_progress(),
                 )
                 .await
                 .map_err(service_error)?;
@@ -227,8 +260,11 @@ impl ServerHandler for GatewayHandler {
         InitializeResult::new(Default::default())
             .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
             .with_server_info(
-                Implementation::new(format!("host-my-mcp/{}", self.ctx.name), env!("CARGO_PKG_VERSION"))
-                    .with_title(format!("{} via host-my-mcp", self.ctx.name)),
+                Implementation::new(
+                    format!("host-my-mcp/{}", self.ctx.name),
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .with_title(format!("{} via host-my-mcp", self.ctx.name)),
             )
     }
 
@@ -236,25 +272,60 @@ impl ServerHandler for GatewayHandler {
         // Sessions are required for correct per-session notification routing;
         // 2026-07-28 removes them, so we cap negotiation at the last version
         // with an `initialize` handshake.
-        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::LATEST_WITH_INITIALIZE))
+        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(
+            &ProtocolVersion::LATEST_WITH_INITIALIZE,
+        ))
     }
 
-    async fn initialize(&self, request: InitializeRequestParams, context: RequestContext<RoleServer>) -> Result<InitializeResult, McpError> {
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
         context.peer.set_peer_info(request.clone());
         self.ensure_registered(&context.peer);
         let principal = self.principal(&context.extensions)?;
         let decision = self.authorize(&principal, "initialize", None, None);
         if !decision.is_allowed() {
-            audit::request(&self.ctx.name, Some(&principal.subject), principal.user.as_deref(), "initialize", None, &decision, None, None, None);
+            audit::request(
+                &self.ctx.name,
+                Some(&principal.subject),
+                principal.user.as_deref(),
+                "initialize",
+                None,
+                &decision,
+                None,
+                None,
+                None,
+            );
             return Err(denied(decision.reason()));
         }
         let started = Instant::now();
         let negotiated = self.negotiate_initialize(&request)?;
         let info = self.backend.info().await.map_err(backend_error)?;
-        audit::request(&self.ctx.name, Some(&principal.subject), principal.user.as_deref(), "initialize", None, &decision, Some(started.elapsed()), None, None);
+        audit::request(
+            &self.ctx.name,
+            Some(&principal.subject),
+            principal.user.as_deref(),
+            "initialize",
+            None,
+            &decision,
+            Some(started.elapsed()),
+            None,
+            None,
+        );
 
-        let mut backend_impl = info.server_info.clone().unwrap_or_else(|| Implementation::new(self.ctx.name.clone(), "unknown"));
-        backend_impl.title = Some(format!("{} via host-my-mcp", backend_impl.title.clone().unwrap_or_else(|| backend_impl.name.clone())));
+        let mut backend_impl = info
+            .server_info
+            .clone()
+            .unwrap_or_else(|| Implementation::new(self.ctx.name.clone(), "unknown"));
+        backend_impl.title = Some(format!(
+            "{} via host-my-mcp",
+            backend_impl
+                .title
+                .clone()
+                .unwrap_or_else(|| backend_impl.name.clone())
+        ));
         let mut result = InitializeResult::new(info.capabilities.clone())
             .with_protocol_version(negotiated.protocol_version)
             .with_server_info(backend_impl);
@@ -262,31 +333,67 @@ impl ServerHandler for GatewayHandler {
         Ok(result)
     }
 
-    async fn list_tools(&self, request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListToolsResult, McpError> {
+    async fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
         let principal = self.principal(&context.extensions)?;
         let mut result = self
-            .forward(&context, "tools/list", ClientRequest::ListToolsRequest(optional_request(request)), |r| expect_variant!(r, ListToolsResult => |x| x))
+            .forward(
+                &context,
+                "tools/list",
+                ClientRequest::ListToolsRequest(optional_request(request)),
+                |r| expect_variant!(r, ListToolsResult => |x| x),
+            )
             .await?;
         if self.ctx.config.filter_tool_list {
             let before = result.tools.len();
-            result.tools.retain(|t| self.authorize(&principal, "tools/list", Some(&t.name), None).is_allowed());
+            result.tools.retain(|t| {
+                self.authorize(&principal, "tools/list", Some(&t.name), None)
+                    .is_allowed()
+            });
             tracing::debug!(server = %self.ctx.name, before, after = result.tools.len(), "filtered tools/list");
         }
         Ok(result)
     }
 
-    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, McpError> {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
         self.ensure_registered(&context.peer);
         let principal = self.principal(&context.extensions)?;
         let tool = request.name.to_string();
-        let decision = self.authorize(&principal, "tools/call", Some(&tool), request.arguments.as_ref());
+        let decision = self.authorize(
+            &principal,
+            "tools/call",
+            Some(&tool),
+            request.arguments.as_ref(),
+        );
         let logged_args = self
             .ctx
             .log_arguments
-            .then(|| request.arguments.as_ref().map(|a| serde_json::Value::Object(a.clone())))
+            .then(|| {
+                request
+                    .arguments
+                    .as_ref()
+                    .map(|a| serde_json::Value::Object(a.clone()))
+            })
             .flatten();
         if !decision.is_allowed() {
-            audit::request(&self.ctx.name, Some(&principal.subject), principal.user.as_deref(), "tools/call", Some(&tool), &decision, None, None, logged_args.as_ref());
+            audit::request(
+                &self.ctx.name,
+                Some(&principal.subject),
+                principal.user.as_deref(),
+                "tools/call",
+                Some(&tool),
+                &decision,
+                None,
+                None,
+                logged_args.as_ref(),
+            );
             return Err(denied(decision.reason()));
         }
 
@@ -302,13 +409,20 @@ impl ServerHandler for GatewayHandler {
             let handle = peer
                 .send_request_with_option(
                     ClientRequest::CallToolRequest(CallToolRequest::new(params)),
-                    PeerRequestOptions::with_timeout(self.backend.spec().request_timeout).reset_timeout_on_progress(),
+                    PeerRequestOptions::with_timeout(self.backend.spec().request_timeout)
+                        .reset_timeout_on_progress(),
                 )
                 .await
                 .map_err(service_error)?;
             let backend_token = handle.progress_token.clone();
             if let Some(ct) = client_token.clone() {
-                registry.register_progress(backend_token.clone(), ProgressRoute { peer: context.peer.clone(), client_token: ct });
+                registry.register_progress(
+                    backend_token.clone(),
+                    ProgressRoute {
+                        peer: context.peer.clone(),
+                        client_token: ct,
+                    },
+                );
             }
             let id = handle.id.clone();
             let bpeer = handle.peer.clone();
@@ -345,51 +459,126 @@ impl ServerHandler for GatewayHandler {
         result
     }
 
-    async fn list_prompts(&self, request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListPromptsResult, McpError> {
-        self.forward(&context, "prompts/list", ClientRequest::ListPromptsRequest(optional_request(request)), |r| expect_variant!(r, ListPromptsResult => |x| x)).await
+    async fn list_prompts(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        self.forward(
+            &context,
+            "prompts/list",
+            ClientRequest::ListPromptsRequest(optional_request(request)),
+            |r| expect_variant!(r, ListPromptsResult => |x| x),
+        )
+        .await
     }
 
-    async fn get_prompt(&self, request: GetPromptRequestParams, context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
         self.forward(&context, "prompts/get", ClientRequest::GetPromptRequest(GetPromptRequest::new(request)), |r| {
             expect_variant!(r, GetPromptResult => GetPromptResponse::Complete, InputRequiredResult => GetPromptResponse::InputRequired)
         })
         .await
     }
 
-    async fn list_resources(&self, request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListResourcesResult, McpError> {
-        self.forward(&context, "resources/list", ClientRequest::ListResourcesRequest(optional_request(request)), |r| expect_variant!(r, ListResourcesResult => |x| x)).await
-    }
-
-    async fn list_resource_templates(&self, request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListResourceTemplatesResult, McpError> {
-        self.forward(&context, "resources/templates/list", ClientRequest::ListResourceTemplatesRequest(optional_request(request)), |r| {
-            expect_variant!(r, ListResourceTemplatesResult => |x| x)
-        })
+    async fn list_resources(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        self.forward(
+            &context,
+            "resources/list",
+            ClientRequest::ListResourcesRequest(optional_request(request)),
+            |r| expect_variant!(r, ListResourcesResult => |x| x),
+        )
         .await
     }
 
-    async fn read_resource(&self, request: ReadResourceRequestParams, context: RequestContext<RoleServer>) -> Result<ReadResourceResponse, McpError> {
+    async fn list_resource_templates(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        self.forward(
+            &context,
+            "resources/templates/list",
+            ClientRequest::ListResourceTemplatesRequest(optional_request(request)),
+            |r| expect_variant!(r, ListResourceTemplatesResult => |x| x),
+        )
+        .await
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
         self.forward(&context, "resources/read", ClientRequest::ReadResourceRequest(ReadResourceRequest::new(request)), |r| {
             expect_variant!(r, ReadResourceResult => ReadResourceResponse::Complete, InputRequiredResult => ReadResourceResponse::InputRequired)
         })
         .await
     }
 
-    async fn complete(&self, request: CompleteRequestParams, context: RequestContext<RoleServer>) -> Result<CompleteResult, McpError> {
-        self.forward(&context, "completion/complete", ClientRequest::CompleteRequest(CompleteRequest::new(request)), |r| expect_variant!(r, CompleteResult => |x| x)).await
+    async fn complete(
+        &self,
+        request: CompleteRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CompleteResult, McpError> {
+        self.forward(
+            &context,
+            "completion/complete",
+            ClientRequest::CompleteRequest(CompleteRequest::new(request)),
+            |r| expect_variant!(r, CompleteResult => |x| x),
+        )
+        .await
     }
 
-    async fn set_level(&self, request: SetLevelRequestParams, context: RequestContext<RoleServer>) -> Result<(), McpError> {
-        self.forward(&context, "logging/setLevel", ClientRequest::SetLevelRequest(SetLevelRequest::new(request)), |r| expect_variant!(r, EmptyResult => |_| ())).await
+    async fn set_level(
+        &self,
+        request: SetLevelRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.forward(
+            &context,
+            "logging/setLevel",
+            ClientRequest::SetLevelRequest(SetLevelRequest::new(request)),
+            |r| expect_variant!(r, EmptyResult => |_| ()),
+        )
+        .await
     }
 
     #[allow(deprecated)]
-    async fn subscribe(&self, request: SubscribeRequestParams, context: RequestContext<RoleServer>) -> Result<(), McpError> {
-        self.forward(&context, "resources/subscribe", ClientRequest::SubscribeRequest(SubscribeRequest::new(request)), |r| expect_variant!(r, EmptyResult => |_| ())).await
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.forward(
+            &context,
+            "resources/subscribe",
+            ClientRequest::SubscribeRequest(SubscribeRequest::new(request)),
+            |r| expect_variant!(r, EmptyResult => |_| ()),
+        )
+        .await
     }
 
     #[allow(deprecated)]
-    async fn unsubscribe(&self, request: UnsubscribeRequestParams, context: RequestContext<RoleServer>) -> Result<(), McpError> {
-        self.forward(&context, "resources/unsubscribe", ClientRequest::UnsubscribeRequest(UnsubscribeRequest::new(request)), |r| expect_variant!(r, EmptyResult => |_| ())).await
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.forward(
+            &context,
+            "resources/unsubscribe",
+            ClientRequest::UnsubscribeRequest(UnsubscribeRequest::new(request)),
+            |r| expect_variant!(r, EmptyResult => |_| ()),
+        )
+        .await
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {

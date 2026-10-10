@@ -67,12 +67,21 @@ impl JwksCache {
     /// Fetch now (used at startup so a misconfigured issuer fails fast).
     pub async fn warm(&self) -> Result<usize, JwksError> {
         self.refresh(true).await?;
-        Ok(self.cache.read().await.as_ref().map(|c| c.set.keys.len()).unwrap_or(0))
+        Ok(self
+            .cache
+            .read()
+            .await
+            .as_ref()
+            .map(|c| c.set.keys.len())
+            .unwrap_or(0))
     }
 
     async fn refresh(&self, force: bool) -> Result<(), JwksError> {
         let mut guard = self.refresh_lock.lock().await;
-        if !force && let Some(last) = *guard && last.elapsed() < self.min_refresh {
+        if !force
+            && let Some(last) = *guard
+            && last.elapsed() < self.min_refresh
+        {
             // Another caller refreshed moments ago; the key is simply unknown.
             return Ok(());
         }
@@ -86,11 +95,17 @@ impl JwksCache {
         if !resp.status().is_success() {
             return Err(JwksError::Fetch(format!("HTTP {}", resp.status())));
         }
-        let set: JwkSet = resp.json().await.map_err(|e| JwksError::Invalid(e.to_string()))?;
+        let set: JwkSet = resp
+            .json()
+            .await
+            .map_err(|e| JwksError::Invalid(e.to_string()))?;
         if set.keys.is_empty() {
             return Err(JwksError::Invalid("empty key set".into()));
         }
-        *self.cache.write().await = Some(Cached { set, fetched_at: Instant::now() });
+        *self.cache.write().await = Some(Cached {
+            set,
+            fetched_at: Instant::now(),
+        });
         *guard = Some(Instant::now());
         Ok(())
     }
@@ -133,7 +148,9 @@ impl KeySource for JwksCache {
                 None => Err(e),
             };
         }
-        self.lookup(kid).await.unwrap_or_else(|| Err(JwksError::UnknownKid(kid.to_string())))
+        self.lookup(kid)
+            .await
+            .unwrap_or_else(|| Err(JwksError::UnknownKid(kid.to_string())))
     }
 }
 
@@ -144,7 +161,8 @@ pub struct StaticKeys {
 
 impl StaticKeys {
     pub fn from_json(json: &str) -> Result<Arc<Self>, JwksError> {
-        let set: JwkSet = serde_json::from_str(json).map_err(|e| JwksError::Invalid(e.to_string()))?;
+        let set: JwkSet =
+            serde_json::from_str(json).map_err(|e| JwksError::Invalid(e.to_string()))?;
         Ok(Arc::new(Self { set }))
     }
 }
@@ -152,7 +170,10 @@ impl StaticKeys {
 #[async_trait::async_trait]
 impl KeySource for StaticKeys {
     async fn key_for(&self, kid: &str) -> Result<Arc<DecodingKey>, JwksError> {
-        let jwk = self.set.find(kid).ok_or_else(|| JwksError::UnknownKid(kid.to_string()))?;
+        let jwk = self
+            .set
+            .find(kid)
+            .ok_or_else(|| JwksError::UnknownKid(kid.to_string()))?;
         DecodingKey::from_jwk(jwk)
             .map(Arc::new)
             .map_err(|e| JwksError::UnusableKey(kid.to_string(), e.to_string()))
