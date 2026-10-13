@@ -51,6 +51,7 @@ pub struct TokenValidator {
 }
 
 impl TokenValidator {
+    /// Validator for an external authorization server (`auth.issuer`).
     pub fn new(auth: &Auth, keys: Arc<dyn KeySource>) -> anyhow::Result<Self> {
         let issuer = auth
             .issuer
@@ -66,13 +67,24 @@ impl TokenValidator {
                     .map_err(|e| anyhow::anyhow!("bad algorithm {a}: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
+        Ok(Self::with_issuer(issuer, algorithms, auth, keys))
+    }
+
+    /// Validator for an explicit issuer and algorithm list (the built-in
+    /// authorization server validates its own tokens this way).
+    pub fn with_issuer(
+        issuer: String,
+        algorithms: Vec<Algorithm>,
+        auth: &Auth,
+        keys: Arc<dyn KeySource>,
+    ) -> Self {
+        Self {
             keys,
             issuer,
             algorithms,
             leeway: Duration::from_secs(auth.leeway_secs),
             email_claim: auth.email_claim.clone(),
-        })
+        }
     }
 
     /// Validate `token` for `resource` and build a [`Principal`] (without the

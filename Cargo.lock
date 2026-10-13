@@ -657,11 +657,13 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "host-my-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
  "globset",

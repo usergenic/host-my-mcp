@@ -4,6 +4,40 @@ All notable changes to `host-my-mcp` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump may break).
 
+## [0.3.0] - 2026-10-13
+
+### Added
+- **Built-in OAuth 2.1 authorization server with Google sign-in.** Setting
+  `auth.providers.<name>` (issuer, client_id, client_secret of an OpenID
+  Connect provider) makes the gateway its own authorization server: RFC 8414
+  metadata at `/.well-known/oauth-authorization-server`, RFC 7591 dynamic
+  client registration at `/oauth/register`, Authorization Code with mandatory
+  PKCE `S256` and RFC 8707 `resource` at `/oauth/authorize`, upstream OIDC
+  login (PKCE + nonce, ID token verified against the provider's JWKS),
+  per-client consent page (remembered), single-use codes, rotating refresh
+  tokens at `/oauth/token`, EdDSA-signed access tokens whose `aud` is exactly
+  the requested mount(s), JWKS at `/oauth/jwks`. Subjects are
+  `<provider>|<sub>`; the verified `email` is in the token, so
+  `users.<name>.emails` needs no extra configuration. State (signing key,
+  clients, hashed refresh tokens, consents) persists under `auth.state_dir`
+  (default `~/.local/state/host-my-mcp`). Mounts validate the tokens through
+  the unchanged resource-server path. README: "Google sign-in setup" (Google
+  Cloud Console walkthrough and troubleshooting), "How the built-in
+  authorization server works", "Other identity providers".
+- `host-my-mcp check` prints the auth mode and, in built-in mode, the exact
+  redirect URI to register at the provider. `/status` reports `auth: builtin`.
+- Config: `auth.providers`, `auth.state_dir`, `auth.access_token_ttl_secs`,
+  `auth.refresh_token_ttl_secs`, `auth.dynamic_registration`. `/oauth/*` is a
+  reserved mount path. `auth.providers` and `auth.issuer` are mutually
+  exclusive; built-in mode requires `https` `public_url` (loopback excepted)
+  and at least one `users` entry.
+
+### Changed
+- README leads with the Google setup; the Auth0 walkthrough moved to a link to
+  the 0.2.0 README under "External authorization server instead". External
+  issuers keep working unchanged.
+- Crate description and keywords no longer mention Auth0.
+
 ## [0.2.0] - 2026-10-09
 
 First published release.

@@ -1,12 +1,12 @@
 [package]
 name = "host-my-mcp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
-description = "One public Streamable HTTP MCP gateway that authenticates with OAuth (Auth0), authorizes per server and per tool, and routes paths to local stdio MCP servers"
+description = "One public Streamable HTTP MCP gateway with a built-in OAuth 2.1 authorization server (sign in with Google or any OIDC provider), per-server and per-tool authorization, routing paths to local stdio MCP servers"
 license = "MIT"
 repository = "https://github.com/usergenic/host-my-mcp"
-keywords = ["mcp", "oauth", "gateway", "proxy", "auth0"]
+keywords = ["mcp", "oauth", "gateway", "proxy", "oidc"]
 categories = ["web-programming::http-server", "command-line-utilities"]
 readme = "README.md"
 default-run = "host-my-mcp"
@@ -38,6 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+aws-lc-rs = "1"
+base64 = "0.22"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
 globset = "0.4"
 clap = { version = "4", features = ["derive", "env"] }

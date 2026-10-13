@@ -35,7 +35,7 @@ pub enum ConfigError {
 pub struct Config {
     #[serde(default)]
     pub listen: Listen,
-    /// Public origin clients use, e.g. `https://mcp-ph.zocomputer.io`. No trailing slash.
+    /// Public origin clients use, e.g. `https://mcp.example.com`. No trailing slash.
     pub public_url: Url,
     #[serde(default)]
     pub auth: Auth,
@@ -118,6 +118,76 @@ pub struct Auth {
     /// declare its own (`scopes_supported`).
     #[serde(default)]
     pub default_scopes: Vec<String>,
+    /// Upstream OpenID Connect identity providers (`google`, …). When this map
+    /// is non-empty the gateway is its own OAuth 2.1 authorization server:
+    /// MCP clients register, authorize and fetch tokens from the gateway, and
+    /// the human login step is delegated to one of these providers.
+    /// Mutually exclusive with `issuer`.
+    #[serde(default)]
+    pub providers: BTreeMap<String, Provider>,
+    /// Directory for the built-in authorization server's state (signing key,
+    /// registered clients, refresh tokens, remembered consents). Defaults to
+    /// `$XDG_STATE_HOME/host-my-mcp` or `~/.local/state/host-my-mcp`.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+    /// Lifetime of access tokens minted by the built-in authorization server.
+    #[serde(default = "default_access_token_ttl")]
+    pub access_token_ttl_secs: u64,
+    /// Lifetime of refresh tokens minted by the built-in authorization server
+    /// (rotated on every use; this bounds how long a client can stay signed in
+    /// without a new Google login).
+    #[serde(default = "default_refresh_token_ttl")]
+    pub refresh_token_ttl_secs: u64,
+    /// Accept RFC 7591 dynamic client registration (built-in server only).
+    /// Every MCP client in common use relies on it; registration is open but
+    /// grants nothing by itself, since every login still passes the identity
+    /// provider, `users`, and `allowed_users`.
+    #[serde(default = "default_true")]
+    pub dynamic_registration: bool,
+}
+
+/// One upstream OpenID Connect provider used by the built-in authorization
+/// server for the human login step.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    /// OIDC issuer, e.g. `https://accounts.google.com`. Discovery is read from
+    /// `<issuer>/.well-known/openid-configuration` at startup.
+    pub issuer: Url,
+    /// OAuth client id registered with the provider for this gateway.
+    pub client_id: String,
+    /// The matching client secret. Use `${GOOGLE_CLIENT_SECRET}`.
+    pub client_secret: String,
+    /// Scopes requested from the provider.
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: Vec<String>,
+    /// Label shown on the provider picker and consent page.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Refuse identities whose provider reports `email_verified: false`.
+    #[serde(default = "default_true")]
+    pub require_verified_email: bool,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec!["openid".into(), "email".into(), "profile".into()]
+}
+fn default_access_token_ttl() -> u64 {
+    3600
+}
+fn default_refresh_token_ttl() -> u64 {
+    30 * 24 * 3600
+}
+
+/// How the gateway authenticates requests, derived from `auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// `auth.disabled: true`: everyone is `anonymous`.
+    Disabled,
+    /// `auth.issuer` names an external authorization server (Auth0, …).
+    External,
+    /// `auth.providers` is set: the gateway is the authorization server.
+    BuiltIn,
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -148,11 +218,43 @@ impl Default for Auth {
             jwks_min_refresh_secs: default_jwks_min_refresh(),
             jwks_max_age_secs: default_jwks_max_age(),
             default_scopes: Vec::new(),
+            providers: BTreeMap::new(),
+            state_dir: None,
+            access_token_ttl_secs: default_access_token_ttl(),
+            refresh_token_ttl_secs: default_refresh_token_ttl(),
+            dynamic_registration: true,
         }
     }
 }
 
 impl Auth {
+    pub fn mode(&self) -> AuthMode {
+        if self.disabled {
+            AuthMode::Disabled
+        } else if !self.providers.is_empty() {
+            AuthMode::BuiltIn
+        } else {
+            AuthMode::External
+        }
+    }
+
+    /// Resolved state directory for the built-in authorization server.
+    pub fn state_dir(&self) -> PathBuf {
+        if let Some(d) = &self.state_dir {
+            return d.clone();
+        }
+        if let Some(x) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(x).join("host-my-mcp");
+        }
+        match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h)
+                .join(".local")
+                .join("state")
+                .join("host-my-mcp"),
+            None => PathBuf::from(".host-my-mcp-state"),
+        }
+    }
+
     pub fn jwks_uri(&self) -> Option<Url> {
         if let Some(u) = &self.jwks_uri {
             return Some(u.clone());
@@ -362,9 +464,56 @@ impl Config {
             return Err(ConfigError::Invalid("public_url must be http(s)".into()));
         }
 
-        if !self.auth.disabled {
+        if self.auth.mode() == AuthMode::BuiltIn {
+            if self.auth.issuer.is_some() || self.auth.jwks_uri.is_some() {
+                return Err(ConfigError::Invalid(
+                    "auth.providers (built-in authorization server) and auth.issuer / auth.jwks_uri (external authorization server) are mutually exclusive".into(),
+                ));
+            }
+            if self.public_url.scheme() != "https" && !is_loopback_host(&self.public_url) {
+                return Err(ConfigError::Invalid(
+                    "public_url must use https when the built-in authorization server is enabled (OAuth redirects carry codes); http is only accepted for loopback hosts".into(),
+                ));
+            }
+            for (name, p) in &self.auth.providers {
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth.providers key `{name}` must be non-empty and contain only [A-Za-z0-9_-]"
+                    )));
+                }
+                if p.issuer.scheme() != "https" && !is_loopback_host(&p.issuer) {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth.providers.{name}.issuer must use https"
+                    )));
+                }
+                if p.client_id.trim().is_empty() || p.client_secret.trim().is_empty() {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth.providers.{name}: client_id and client_secret are required"
+                    )));
+                }
+                if !p.scopes.iter().any(|s| s == "openid") {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth.providers.{name}.scopes must include `openid`"
+                    )));
+                }
+            }
+            if self.auth.access_token_ttl_secs < 60 || self.auth.refresh_token_ttl_secs < 60 {
+                return Err(ConfigError::Invalid(
+                    "auth.access_token_ttl_secs and auth.refresh_token_ttl_secs must be at least 60".into(),
+                ));
+            }
+            if self.users.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "the built-in authorization server needs at least one entry under `users` (emails or subjects) to decide who may sign in".into(),
+                ));
+            }
+        } else if !self.auth.disabled {
             let issuer = self.auth.issuer.as_ref().ok_or_else(|| {
-                ConfigError::Invalid("auth.issuer is required unless auth.disabled is true".into())
+                ConfigError::Invalid("auth.issuer (external authorization server) or auth.providers (built-in authorization server with Google sign-in) is required unless auth.disabled is true".into())
             })?;
             if issuer.scheme() != "https" {
                 return Err(ConfigError::Invalid("auth.issuer must use https".into()));
@@ -418,7 +567,12 @@ impl Config {
             let path = normalize_path(&path).ok_or_else(|| {
                 ConfigError::Invalid(format!("server `{name}`: path `{path}` must start with `/`, must not be `/`, and must not contain `..`, `?`, `#`, or whitespace"))
             })?;
-            if path.starts_with("/.well-known") || path == "/healthz" || path == "/status" {
+            if path.starts_with("/.well-known")
+                || path == "/healthz"
+                || path == "/status"
+                || path == "/oauth"
+                || path.starts_with("/oauth/")
+            {
                 return Err(ConfigError::Invalid(format!(
                     "server `{name}`: path `{path}` is reserved"
                 )));
@@ -496,6 +650,17 @@ impl Config {
         self.public_url.as_str().trim_end_matches('/').to_string()
     }
 
+    /// The authorization server MCP clients are sent to: the gateway itself
+    /// in built-in mode, `auth.issuer` for an external one, none when
+    /// authentication is disabled.
+    pub fn authorization_server(&self) -> Option<String> {
+        match self.auth.mode() {
+            AuthMode::Disabled => None,
+            AuthMode::External => self.auth.issuer.as_ref().map(|u| u.as_str().to_string()),
+            AuthMode::BuiltIn => Some(self.public_origin()),
+        }
+    }
+
     pub fn request_timeout(server: &Server) -> Duration {
         Duration::from_secs(server.request_timeout_secs)
     }
@@ -522,6 +687,16 @@ impl Server {
             return &self.scopes;
         }
         &auth.default_scopes
+    }
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1`.
+pub fn is_loopback_host(u: &Url) -> bool {
+    match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
 }
 

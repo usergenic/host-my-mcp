@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use host_my_mcp::{Config, config::LogFormat};
+use host_my_mcp::{
+    Config,
+    config::{AuthMode, LogFormat},
+};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -67,12 +70,31 @@ async fn main() -> anyhow::Result<()> {
             println!("public_url: {}", config.public_origin());
             println!(
                 "auth: {}",
-                if config.auth.disabled {
-                    "DISABLED".to_string()
-                } else {
-                    format!("issuer {}", config.auth.issuer.as_ref().unwrap())
+                match config.auth.mode() {
+                    AuthMode::Disabled => "DISABLED".to_string(),
+                    AuthMode::External =>
+                        format!("external issuer {}", config.auth.issuer.as_ref().unwrap()),
+                    AuthMode::BuiltIn => format!(
+                        "built-in authorization server at {} (providers: {}; state_dir {})",
+                        config.public_origin(),
+                        config
+                            .auth
+                            .providers
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        config.auth.state_dir().display()
+                    ),
                 }
             );
+            if config.auth.mode() == AuthMode::BuiltIn {
+                println!(
+                    "  Google Cloud Console → Authorized redirect URI: {}{}",
+                    config.public_origin(),
+                    host_my_mcp::oauth::CALLBACK_PATH
+                );
+            }
             for (name, s) in &config.servers {
                 println!(
                     "  {name}: {} -> {} {} (resource {}, lifecycle {:?}, users {:?})",

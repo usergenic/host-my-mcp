@@ -1,37 +1,46 @@
 # host-my-mcp
 
-One public, OAuth-protected **Streamable HTTP** MCP gateway in front of many local **stdio** MCP servers.
+One public, OAuth-protected **Streamable HTTP** MCP gateway in front of many local **stdio** MCP servers. Sign in with your Google account; no Auth0, no hosted identity service.
 
 ```text
 MCP clients (Claude, ChatGPT, Cursor, MCP Inspector, …)
-        │  https://mcp-ph.zocomputer.io/<server>
+        │  https://mcp.example.com/<server>
         ▼
-┌─────────────────────────────────────────────┐
-│ host-my-mcp                                 │
-│  • OAuth 2.1 resource server (Auth0 tokens) │
-│  • per-server / per-tool authorization      │
-│  • Streamable HTTP ⇄ stdio bridge           │
-│  • child-process supervision + audit log    │
-└──────┬──────────────┬──────────────┬────────┘
+┌──────────────────────────────────────────────────────┐
+│ host-my-mcp                                          │
+│  • OAuth 2.1 authorization server (built in)         │──► Google sign-in
+│    DCR · PKCE · consent · resource-bound JWTs        │    (or any OIDC provider)
+│  • OAuth 2.1 resource server (validates its tokens)  │
+│  • per-server / per-tool authorization               │
+│  • Streamable HTTP ⇄ stdio bridge                    │
+│  • child-process supervision + audit log             │
+└──────┬──────────────┬──────────────┬─────────────────┘
        │ /omg         │ /toggl       │ /attn
        ▼              ▼              ▼
    omg mcp …      toggl-mcp       attn-mcp        (local stdio processes)
 ```
 
 Each configured server is mounted on its own path **and** is its own OAuth
-resource, so a token minted for `/omg` is useless at `/toggl`. Auth0 owns login
-(Google via Auth0's social connection), consent and token issuance; the gateway
-only validates tokens, authorizes operations, routes, and supervises.
+resource, so a token minted for `/omg` is useless at `/toggl`. The gateway is
+the authorization server MCP clients talk to: they register themselves, run
+Authorization Code + PKCE against it, and receive gateway-signed tokens. The
+only thing it delegates is the human login, to Google (or another OpenID
+Connect provider) through one OAuth client you create in Google Cloud Console.
+An external authorization server (Auth0 and friends) is still supported, see
+[External authorization server](#external-authorization-server-instead).
 
 Written in Rust on top of the official [`rmcp`](https://crates.io/crates/rmcp)
 SDK (both the Streamable HTTP server side and the stdio client side), `axum`,
-and `jsonwebtoken`. Single static binary; no runtime dependencies.
+and `jsonwebtoken`. Single static binary; no runtime dependencies, no database.
 
 ## Contents
 
 - [Quick start (no auth, local)](#quick-start-no-auth-local)
+- [Google sign-in setup](#google-sign-in-setup)
 - [Configuration](#configuration)
-- [Auth0 setup walkthrough](#auth0-setup-walkthrough)
+- [How the built-in authorization server works](#how-the-built-in-authorization-server-works)
+- [Other identity providers](#other-identity-providers)
+- [External authorization server instead](#external-authorization-server-instead)
 - [Deploying behind Zo](#deploying-behind-zo)
 - [How requests are authorized](#how-requests-are-authorized)
 - [Operations](#operations)
@@ -71,6 +80,163 @@ npx @modelcontextprotocol/inspector@latest
 (progress notifications), `fail` and `crash` tools. Swap it for your real
 servers once the plumbing works.
 
+## Google sign-in setup
+
+Goal: you connect an MCP client to `https://mcp.example.com/omg`, a
+browser window opens, you pick your Google account, you click **Allow** once,
+and the client is connected. Google never sees the MCP client; it only sees
+the gateway, which is one ordinary "Web application" OAuth client in your
+Google Cloud project. The whole setup is about ten minutes and is free.
+
+You need: a Google account, the public HTTPS URL the gateway will have
+(`public_url`, e.g. `https://mcp.example.com`), and a shell on the
+machine that runs the gateway.
+
+### 1. Create (or pick) a Google Cloud project
+
+1. Open <https://console.cloud.google.com/> and sign in.
+2. In the project picker at the top, **New project**. Name it `host-my-mcp`
+   (any name works; it is never shown to you later). No organization is
+   needed. **Create**, then make sure the new project is selected.
+
+### 2. Configure the OAuth consent screen ("Google Auth Platform")
+
+1. In the left menu (or the search box) open **Google Auth Platform**
+   (older consoles call it *APIs & Services → OAuth consent screen*).
+2. Click **Get started** and fill in:
+   - **App name**: `host-my-mcp` (this is the name Google shows on the
+     sign-in screen).
+   - **User support email**: your address.
+   - **Audience**: choose **External** unless this Google account belongs to a
+     Google Workspace organization and you want to restrict sign-in to that
+     organization, in which case choose **Internal**.
+   - **Contact information**: your address again.
+   - Accept the policy, **Create**.
+3. Open **Audience** in the left menu. With *External* the app starts in
+   **Testing** mode. Leave it there and add yourself under **Test users →
+   Add users**. Testing mode means only listed Google accounts can get past
+   the Google sign-in screen, which is exactly what a personal gateway wants
+   (the gateway's own `users` list is the second lock). The "7-day token
+   expiry" warning Google shows for Testing mode does not apply: the gateway
+   only uses Google at the moment you sign in and never stores Google tokens.
+4. You do not need to add anything under **Data Access** (scopes): the
+   gateway only asks for `openid`, `email` and `profile`, which are
+   non-sensitive and always available.
+5. **Branding** (logo, home page) is optional.
+
+### 3. Create the OAuth client
+
+1. Open **Clients** in the left menu (older consoles: *APIs & Services →
+   Credentials → Create credentials → OAuth client ID*).
+2. **Create client**:
+   - **Application type**: **Web application**.
+   - **Name**: `host-my-mcp gateway`.
+   - **Authorized JavaScript origins**: leave empty.
+   - **Authorized redirect URIs**: **Add URI** and enter exactly
+
+     ```text
+     https://mcp.example.com/oauth/callback
+     ```
+
+     i.e. your `public_url` followed by `/oauth/callback`, `https`, no
+     trailing slash. `host-my-mcp check` prints the exact value for your
+     config. Google compares this string byte for byte; the most common
+     setup error is a typo here (see troubleshooting).
+3. **Create**. Copy the **Client ID** (looks like
+   `1234567890-abc…xyz.apps.googleusercontent.com`) and the **Client secret**
+   (`GOCSPX-…`). The secret is shown here and in the client's detail page;
+   you can also **Download JSON**.
+
+### 4. Put the credentials in the gateway config
+
+Give the two values to the gateway through the environment so they never
+land in a file you might commit:
+
+```sh
+export GOOGLE_CLIENT_ID='1234567890-abc…xyz.apps.googleusercontent.com'
+export GOOGLE_CLIENT_SECRET='GOCSPX-…'
+```
+
+```yaml
+public_url: https://mcp.example.com
+
+auth:
+  providers:
+    google:
+      issuer: https://accounts.google.com
+      client_id: ${GOOGLE_CLIENT_ID}
+      client_secret: ${GOOGLE_CLIENT_SECRET}
+
+users:
+  brendan:
+    emails: ["you@gmail.com"]          # the Google account(s) allowed in
+
+servers:
+  omg:
+    command: omg
+    args: ["mcp", "-C", "/home/zo/notes"]
+    allowed_users: [brendan]
+    tools:
+      allow: ["*"]
+```
+
+`users.<name>.emails` is matched against the email Google verifies, so this is
+all the identity configuration you need. (If you prefer the stable Google
+account id, use `subjects: ["google|1057…"]`; the id is shown on the "This
+account is not allowed" page and in the audit log the first time an unknown
+account signs in.)
+
+### 5. Start and verify
+
+```sh
+host-my-mcp check      # prints: auth: built-in authorization server at https://… (providers: google; state_dir …)
+                       #         Google Cloud Console → Authorized redirect URI: https://…/oauth/callback
+host-my-mcp
+```
+
+On first start the gateway creates `state_dir` (default
+`~/.local/state/host-my-mcp`), generates its token-signing key, and reads
+Google's discovery document; a wrong `issuer` or an unreachable network fails
+here, loudly. Then, from any machine:
+
+```sh
+curl -s https://mcp.example.com/.well-known/oauth-authorization-server | jq
+# → issuer, authorization_endpoint, token_endpoint, registration_endpoint, jwks_uri, …
+curl -s https://mcp.example.com/.well-known/oauth-protected-resource/omg | jq .authorization_servers
+# → ["https://mcp.example.com"]
+curl -si -X POST https://mcp.example.com/omg | grep -i www-authenticate
+# → Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/omg"
+```
+
+### 6. Connect a client
+
+Add `https://mcp.example.com/omg` as a connector / remote MCP server in
+Claude, ChatGPT, Cursor, or run MCP Inspector against it. The client
+registers itself with the gateway, opens the browser, Google asks you to pick
+an account, the gateway asks once whether to allow *that client* to use *that
+server* as you, and you are in. Nothing to pre-register per client, no client
+secrets to paste anywhere.
+
+The first login from a Google account that is not under `users` ends on a
+page that shows the account's subject and email so you can add it; the audit
+log gets the same line:
+
+```text
+audit: server=oauth stage=authn outcome=deny subject=google|1057… user=- detail=identity does not map to a configured user (email you@gmail.com)
+```
+
+### Troubleshooting Google
+
+| Google says | Fix |
+| --- | --- |
+| **Error 400: redirect_uri_mismatch** | The redirect URI in Cloud Console is not byte-identical to `<public_url>/oauth/callback`. Check scheme, host, port, path and trailing slash. Changes take effect within a minute. |
+| **Error 403: access_denied** / *"host-my-mcp has not completed the Google verification process"* | Audience is *External* in Testing mode and this Google account is not a test user. Add it under **Audience → Test users**. |
+| **Error 403: org_internal** | Audience is *Internal* and the account is outside the Workspace organization. Use *External*, or sign in with an organization account. |
+| **Error 401: invalid_client** / *"The OAuth client was not found"* | Client ID or secret is wrong or belongs to another project. Re-copy both; make sure the env vars are set in the gateway's environment, not just your shell. |
+| **"This app isn't verified"** interstitial | Only appears if you publish the app to production with sensitive scopes. The gateway uses none; stay in Testing mode or publish without extra scopes. |
+| Gateway page **"Sign-in expired"** | More than ten minutes passed between opening the client and finishing login, or the gateway restarted mid-flow. Reconnect from the client. |
+| Gateway page **"This account is not allowed"** | Working as intended: add the shown email or subject to `users`, restart, reconnect. |
+
 ## Configuration
 
 Full annotated example: [`host-my-mcp.example.yaml`](host-my-mcp.example.yaml).
@@ -79,19 +245,22 @@ so secrets never need to be committed.
 
 ```yaml
 listen: { host: 127.0.0.1, port: 8080 }
-public_url: https://mcp-ph.zocomputer.io
+public_url: https://mcp.example.com
 
 auth:
-  issuer: https://YOUR_TENANT.us.auth0.com/
-  email_claim: https://host-my-mcp/email      # optional, see Auth0 step 7
+  providers:
+    google:
+      issuer: https://accounts.google.com
+      client_id: ${GOOGLE_CLIENT_ID}
+      client_secret: ${GOOGLE_CLIENT_SECRET}
 
 users:
   brendan:
-    subjects: ["google-oauth2|1057…"]           # stable; preferred
-    emails: ["you@example.com"]                 # convenience
+    emails: ["you@gmail.com"]                   # verified by the provider
+    subjects: ["google|1057…"]                  # optional, stable account id
 
 servers:
-  omg:                                          # mounted at /omg, resource https://mcp-ph.zocomputer.io/omg
+  omg:                                          # mounted at /omg, resource https://mcp.example.com/omg
     command: omg
     args: ["mcp", "-C", "/home/zo/notes"]
     allowed_users: [brendan]
@@ -99,6 +268,23 @@ servers:
       allow: ["*"]
       deny: ["docs_delete"]
 ```
+
+### Auth keys
+
+| key | default | meaning |
+| --- | --- | --- |
+| `providers.<name>.issuer` | | OpenID Connect issuer of an identity provider; `https://accounts.google.com` for Google. Setting any provider turns on the built-in authorization server |
+| `providers.<name>.client_id`, `client_secret` | | the OAuth client you created at the provider for this gateway |
+| `providers.<name>.scopes` | `[openid, email, profile]` | scopes requested from the provider; must include `openid` |
+| `providers.<name>.display_name` | capitalized `<name>` | label on the provider picker when several providers are configured |
+| `providers.<name>.require_verified_email` | `true` | refuse identities whose provider reports `email_verified: false` |
+| `state_dir` | `$XDG_STATE_HOME/host-my-mcp` or `~/.local/state/host-my-mcp` | signing key, registered clients, refresh tokens, consents (files are `0600`) |
+| `access_token_ttl_secs` | `3600` | lifetime of access tokens |
+| `refresh_token_ttl_secs` | `2592000` (30 days) | how long a client stays signed in without a new Google login; refresh tokens rotate on every use |
+| `dynamic_registration` | `true` | serve RFC 7591 registration; every current MCP client needs it |
+| `disabled` | `false` | run without authentication (local only); every caller is `anonymous` |
+| `issuer`, `jwks_uri`, `algorithms`, `email_claim`, `leeway_secs`, `jwks_*` | | external authorization server mode, see [below](#external-authorization-server-instead); `issuer` and `providers` are mutually exclusive |
+| `default_scopes` | `[]` | scopes advertised for servers that declare none |
 
 ### Listen keys
 
@@ -120,30 +306,30 @@ listen:
   allowed_origins: ["http://localhost:5173", "https://app.example.com"]
 ```
 
-For each listed origin the gateway answers `OPTIONS` preflights on every mount
-and on `/.well-known/oauth-protected-resource/<path>` with `204` and
+For each listed origin the gateway answers `OPTIONS` preflights on every mount,
+on the well-known documents and on the OAuth endpoints with `204` and
 `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`,
 `Access-Control-Allow-Headers: Authorization, Content-Type, Accept,
 Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID`, `Access-Control-Max-Age: 600`,
 without requiring a token (browsers never send `Authorization` on a preflight).
-Actual responses, including the `401` challenge and the metadata document,
-carry `Access-Control-Allow-Origin: <origin>`, `Vary: Origin` and
-`Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id,
-Mcp-Protocol-Version`, so the browser can read the challenge, run discovery,
-DCR/CIMD and PKCE against Auth0, and keep the MCP session id. Origins not on the
-list receive no CORS headers at all. Native and CLI clients send no `Origin` and
-are unaffected. Use `http://localhost:*` to accept any port on localhost during
-development.
+Actual responses, including the `401` challenge, the metadata documents and
+the token endpoint, carry `Access-Control-Allow-Origin: <origin>`,
+`Vary: Origin` and `Access-Control-Expose-Headers: WWW-Authenticate,
+Mcp-Session-Id, Mcp-Protocol-Version`, so the browser can read the challenge,
+run discovery, registration and PKCE, and keep the MCP session id. Origins
+not on the list receive no CORS headers at all. Native and CLI clients send
+no `Origin` and are unaffected. Use `http://localhost:*` to accept any port on
+localhost during development.
 
 ### Server keys
 
 | key | default | meaning |
 | --- | --- | --- |
-| `path` | `/<name>` | mount path; also the path component of the default resource |
+| `path` | `/<name>` | mount path; also the path component of the default resource. `/oauth/*`, `/.well-known/*`, `/healthz`, `/status` are reserved |
 | `command`, `args`, `env`, `cwd` | | how to spawn the stdio server; stdout is MCP, stderr is logged |
 | `resource` | `<public_url><path>` | the OAuth resource identifier the token's `aud` must contain |
 | `allowed_users` | `[]` (nobody) | names from `users`; `"*"` admits any authenticated identity |
-| `scopes` | `[]` | scopes the token must carry for this resource (all required) |
+| `scopes` | `[]` | scopes the token must carry for this resource (all required). The built-in authorization server grants a server's advertised scopes to every user it admits |
 | `scopes_supported` | `scopes` | what to advertise in protected-resource metadata |
 | `tools.allow` / `tools.deny` | `[]` / `[]` | tool-name globs; deny wins; empty allow permits nothing |
 | `user_tools.<user>` | | per-user override: `allow` replaces the server allow list, `deny` is merged |
@@ -159,195 +345,95 @@ one character, `[abc]` / `[a-z]` / `[!x]` classes, `{a,b}` alternation.
 
 ### Where the identity comes from
 
-The policy key is the token's `sub` claim (for Google-through-Auth0 that looks
-like `google-oauth2|1057…`). Emails are a convenience and only work if the
-access token carries an email claim (Auth0 needs an Action for that, step 7).
+The policy key is the token's `sub` claim. Tokens minted by the built-in
+authorization server use `<provider>|<provider's sub>`, e.g.
+`google|1057…`, and carry the provider-verified `email`, so either
+`users.<name>.subjects` or `users.<name>.emails` works. Subjects are stable
+even if the account's email changes; emails are easier to type.
 
-**Finding your `sub`:** either open the user in Auth0 → *User Management →
-Users* and copy *user_id*, or just connect once with a token: the gateway logs
-an audit line like
+## How the built-in authorization server works
 
-```
-audit: server=omg stage=authn outcome=deny subject=google-oauth2|1057… user=- detail=subject `google-oauth2|1057…` does not map to a configured user
-```
+The gateway implements the authorization-server half of the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+itself, in the "resource server and authorization server are the same
+service, login delegated to a third party" shape the spec describes.
 
-and you paste that subject into `users`.
-
-## Auth0 setup walkthrough
-
-Goal: Auth0 is the authorization server, Google is the identity provider, and
-every MCP path is a separate Auth0 **API** whose identifier is the path's URL.
-MCP clients discover all of this automatically from the gateway's 401 challenge.
-
-The steps use the dashboard and the [Auth0 CLI](https://github.com/auth0/auth0-cli)
-(`brew install auth0/auth0-cli/auth0`, then `auth0 login`). Replace
-`YOUR_TENANT.us.auth0.com` and `mcp-ph.zocomputer.io` with your values.
-
-### 1. Tenant toggles (Settings → Advanced → Settings)
-
-Turn on all four:
-
-| toggle | why |
+| endpoint | purpose |
 | --- | --- |
-| **Resource Parameter Compatibility Profile** | MCP clients send RFC 8707 `resource=https://mcp-ph.zocomputer.io/omg` instead of Auth0's `audience`; with this on, Auth0 uses it to pick the API and set `aud`. Required. |
-| **Include Issuer in Authorization Responses** | adds `iss` to the redirect, defends against mix-up attacks. Recommended by Auth0 for MCP. |
-| **Client ID Metadata Document Registration** | lets clients that publish a CIMD (an HTTPS URL as `client_id`) use your tenant without pre-registration. Auth0 recommends this over DCR. |
-| **Dynamic Client Registration (DCR)** | lets clients that only speak RFC 7591 register themselves. Claude, ChatGPT, Cursor and MCP Inspector all support DCR today; CIMD support is newer and uneven. Enable it until every client you care about does CIMD. |
+| `GET /.well-known/oauth-authorization-server` (also `/.well-known/openid-configuration`) | RFC 8414 metadata: endpoints below, `code_challenge_methods_supported: [S256]`, `scopes_supported`, `authorization_response_iss_parameter_supported` |
+| `POST /oauth/register` | RFC 7591 dynamic client registration. Accepts `redirect_uris` (https, `http://localhost` / `127.0.0.1` on any port, or a private-use scheme such as `cursor://`), `token_endpoint_auth_method` `none` / `client_secret_basic` / `client_secret_post`, `client_name`, … Returns `client_id` (and a secret for confidential clients) |
+| `GET /oauth/authorize` | Authorization Code with mandatory PKCE `S256` and an RFC 8707 `resource` naming one of the mounts (with a single mount configured it may be omitted). Redirects the browser to the identity provider |
+| `GET /oauth/callback` | Returns from the provider, verifies the ID token (signature via the provider's JWKS, `iss`, `aud`, `nonce`, expiry, PKCE), resolves the identity against `users`, checks `allowed_users` and `scopes` for the requested mounts, then shows the consent page |
+| `POST /oauth/consent` | **Allow** issues a single-use, five-minute authorization code and redirects to the client's registered `redirect_uri` with `code`, `state` and `iss`. The decision is remembered per (account, client), so later logins skip the page |
+| `POST /oauth/token` | `authorization_code` (verifies client, code, `redirect_uri`, PKCE, `resource`) and `refresh_token` (rotating; the old token is dead the moment the new one is issued; a token replayed by another client revokes the whole family). Returns `access_token`, `refresh_token`, `expires_in`, `scope` |
+| `GET /oauth/jwks` | the gateway's public signing key |
 
-Equivalent CLI for DCR:
+**Tokens.** Access tokens are EdDSA (Ed25519) JWTs, `typ: at+jwt`, with
+`iss` = `public_url`, `sub` = `google|…`, `aud` = exactly the resources
+requested, `email`, `name`, `client_id`, `scope`, `jti`, one hour by default.
+The mounts validate them with the same code path used for an external
+issuer, so the audience binding, scope checks and `users` resolution are
+identical in both modes. Refresh tokens are opaque and stored hashed.
 
-```sh
-auth0 api patch "tenants/settings" --data '{"flags":{"enable_dynamic_client_registration":true}}'
-```
+**Consent.** The MCP spec requires a proxy that fronts dynamically
+registered clients with one static upstream client id to obtain the user's
+consent per client (otherwise a malicious client could ride a silent Google
+re-login). The gateway shows one page naming the client, its redirect URI,
+the servers it asked for and the account you signed in with; approve once per
+client. Consents, clients and refresh tokens live in `state_dir`, so restarts
+are invisible to clients; wipe the directory to force everyone to register
+and log in again.
 
-> DCR is *open*: anyone can register an application in your tenant. Registered
-> apps are third-party apps that only get what you grant them in step 3, and
-> every user still has to pass Google login and your `allowed_users` list, so
-> the exposure is bounded. Auth0's Tenant ACL (Enterprise) can restrict it
-> further. Watch `auth0 logs list --filter 'type:sapi AND description:"Dynamic client registration"'`.
+**What Google sees.** One OAuth client, one redirect URI, logins with
+`openid email profile`. No Google refresh tokens are requested or stored, no
+Google API is called after login, and no Google token ever reaches an MCP
+client or a backend.
 
-### 2. Google as the identity provider
+## Other identity providers
 
-*Authentication → Social → Create Connection → Google / Gmail.* Auth0's
-development keys work for testing; for real use create an OAuth client in
-Google Cloud Console (type *Web application*, authorized redirect URI
-`https://YOUR_TENANT.us.auth0.com/login/callback`) and paste its client ID and
-secret into the connection.
-
-Then **promote the connection to domain level** so third-party apps (anything
-registered through DCR or CIMD) can use it. *Connection → Settings → Advanced →
-Promote Connection to Domain Level*, or:
-
-```sh
-auth0 api get connections            # find the google-oauth2 connection id (con_…)
-auth0 api patch "connections/con_XXXX" --data '{"is_domain_connection":true}'
-```
-
-If you also keep a Username-Password database connection, either promote it
-too or (simpler) disable it so Google is the only way in.
-
-### 3. One API per MCP path
-
-For each server in your config, create an API whose **Identifier is exactly the
-resource URL** the gateway advertises. By default that is `public_url` + path,
-no trailing slash. `host-my-mcp metadata` prints the exact value for each
-server.
-
-```sh
-for name in omg toggl attn; do
-  auth0 api post resource-servers --data "$(cat <<JSON
-{
-  "name": "mcp ${name}",
-  "identifier": "https://mcp-ph.zocomputer.io/${name}",
-  "signing_alg": "RS256",
-  "token_lifetime": 3600,
-  "allow_offline_access": true,
-  "skip_consent_for_verifiable_first_party_clients": true
-}
-JSON
-)"
-done
-```
-
-Dashboard equivalent: *Applications → APIs → Create API*; Identifier
-`https://mcp-ph.zocomputer.io/omg`; JSON Web Token Profile *Auth0* or *RFC
-9068* (both work); signing RS256. Under *Settings*: **Allow Offline Access**
-on (clients get refresh tokens and stop re-prompting), token expiration 3600s
-or less.
-
-**Grant third-party apps access.** DCR/CIMD clients are third-party apps and
-cannot be granted access one by one, so on *each* API open *Settings →
-Default Permissions for Third-Party Applications* (older tenants: *Application
-Access Policy*) and set *User-Delegated Access* to **All** (or **Authorized**
-with the scopes you define in step 4). Without this, clients get
-`access_denied` from Auth0 before they ever reach the gateway.
-
-Why one API per path and not one API with scopes? Because the token's `aud`
-is then the path itself, and the gateway refuses a token whose `aud` does not
-contain the resource being accessed (RFC 8707). If you prefer a single API,
-set `resource:` on every server to that one identifier and use `scopes:` per
-server (`omg:use`, `toggl:use`, …) so cross-server reuse is still blocked.
-
-### 4. Scopes (optional)
-
-If a server has `scopes: ["toggl:use"]`, define the permission on that API
-(*API → Permissions*), and either enable **RBAC + "Add Permissions in the Access
-Token"** and assign it to your user via a role, or include it in the third-party
-default grant. The gateway reads both the `scope` claim and Auth0's
-`permissions` array claim and advertises the required scopes in the 401
-challenge and in `scopes_supported`, so clients request them automatically.
-
-Most personal setups do not need scopes at all: `allowed_users` plus tool globs
-already bound access tightly.
-
-### 5. Clients: nothing to pre-register (usually)
-
-With steps 1–3, a client connecting to `https://mcp-ph.zocomputer.io/omg` will:
-get a 401 whose `WWW-Authenticate` points at
-`/.well-known/oauth-protected-resource/omg` → learn the issuer → fetch
-`https://YOUR_TENANT.us.auth0.com/.well-known/openid-configuration` → register
-itself (CIMD or DCR) → run Authorization Code + PKCE with `resource=…/omg` →
-retry with a bearer token. No client secrets anywhere.
-
-If you want a **pre-registered** client instead (for example MCP Inspector at
-`http://localhost:6274/oauth/callback`), create a *Native* application with
-that callback URL, grant it the API, and enter its client ID in the client.
-
-### 6. Verify discovery
-
-```sh
-# authorization server metadata must advertise PKCE and (if enabled) DCR/CIMD
-curl -s https://YOUR_TENANT.us.auth0.com/.well-known/openid-configuration \
-  | jq '{issuer, code_challenge_methods_supported, registration_endpoint, client_id_metadata_document_supported}'
-
-# the gateway must answer with the RFC 9728 document
-curl -s https://mcp-ph.zocomputer.io/.well-known/oauth-protected-resource/omg | jq
-# → {"resource":"https://mcp-ph.zocomputer.io/omg","authorization_servers":["https://YOUR_TENANT.us.auth0.com/"],…}
-
-# and challenge unauthenticated requests
-curl -si -X POST https://mcp-ph.zocomputer.io/omg | grep -i www-authenticate
-```
-
-### 7. (Optional) Put the email in the access token
-
-Auth0 access tokens carry `sub` but not `email`. If you want `emails:` matching
-or readable audit lines, add a Post-Login Action (*Actions → Library → Build
-Custom*, trigger *Login / Post Login*) and attach it to the Login flow:
-
-```js
-exports.onExecutePostLogin = async (event, api) => {
-  if (event.user.email) {
-    api.accessToken.setCustomClaim("https://host-my-mcp/email", event.user.email);
-  }
-};
-```
-
-and set `auth.email_claim: https://host-my-mcp/email` in the gateway config.
-Custom claims must be namespaced URLs; Auth0 silently drops unnamespaced ones.
-
-### 8. Point the gateway at the tenant and connect
+Any OpenID Connect provider with a discovery document works the same way; the
+subject becomes `<name>|<sub>` and the email is taken from the ID token:
 
 ```yaml
 auth:
-  issuer: https://YOUR_TENANT.us.auth0.com/     # exactly as in openid-configuration, trailing slash included
+  providers:
+    google:
+      issuer: https://accounts.google.com
+      client_id: ${GOOGLE_CLIENT_ID}
+      client_secret: ${GOOGLE_CLIENT_SECRET}
+    microsoft:
+      issuer: https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0
+      client_id: ${AZURE_CLIENT_ID}
+      client_secret: ${AZURE_CLIENT_SECRET}
+      display_name: Microsoft 365
 ```
 
-Start the gateway, add `https://mcp-ph.zocomputer.io/omg` as a connector in
-Claude / ChatGPT / Cursor, complete the Google login, and watch the audit log.
-Your first attempt will be denied with your `sub` in the log line (see
-"Finding your sub"); add it to `users`, restart, reconnect.
+With more than one provider the authorize endpoint shows a picker page first.
+Register `<public_url>/oauth/callback` as the redirect URI at each provider.
+Providers that are OAuth 2.0 but not OpenID Connect (GitHub, for example) are
+not supported yet.
 
-### Checklist
+## External authorization server instead
 
-- [ ] Resource Parameter Compatibility Profile on
-- [ ] Include Issuer in Authorization Responses on
-- [ ] CIMD registration and/or DCR on
-- [ ] Google connection created and promoted to domain level
-- [ ] One API per path, identifier = exact resource URL, RS256, offline access
-- [ ] Default permissions for third-party applications set on each API
-- [ ] (optional) scopes defined and granted
-- [ ] (optional) email claim Action
-- [ ] `users.<you>.subjects` filled in from the first denied audit line
+If you already run an authorization server that supports dynamic client
+registration and RFC 8707 resource indicators (Auth0, Keycloak, Pomerium,
+…), point the gateway at it instead of configuring providers:
+
+```yaml
+auth:
+  issuer: https://YOUR_TENANT.us.auth0.com/     # exactly as in its openid-configuration
+  # jwks_uri: defaults to <issuer>.well-known/jwks.json
+  # algorithms: [RS256]
+  # email_claim: https://host-my-mcp/email      # if the server adds an email claim
+```
+
+The gateway is then a pure resource server: it validates the issuer's tokens
+(signature via JWKS, `iss`, `exp`/`nbf`, `aud` must contain the mount's
+`resource`) and the issuer must be configured with one API/resource per mount
+whose identifier is the resource URL. The Auth0-specific provisioning
+walkthrough (tenant toggles, Google social connection, one API per path,
+third-party default permissions, email claim Action) is in the
+[0.2.0 README](https://github.com/usergenic/host-my-mcp/blob/v0.2.0/README.md#auth0-setup-walkthrough).
 
 ## Deploying behind Zo
 
@@ -355,14 +441,17 @@ Only the gateway needs a public Zo service. Build on the Zo machine (or copy a
 release binary built with `cargo build --release`), then:
 
 1. Put the config at e.g. `~/.config/host-my-mcp/host-my-mcp.yaml` with
-   `listen.port: 8080` and `public_url: https://mcp-ph.zocomputer.io`.
-   Secrets go in the environment of the service (`${TOGGL_API_TOKEN}` etc.).
+   `listen.port: 8080` and `public_url: https://mcp.example.com`.
+   Secrets go in the environment of the service (`${GOOGLE_CLIENT_SECRET}`,
+   `${TOGGL_API_TOKEN}` etc.). `state_dir` must be writable and persistent.
 2. Run `HOST_MY_MCP_CONFIG=~/.config/host-my-mcp/host-my-mcp.yaml host-my-mcp`
    under your process manager (systemd user unit, pm2, Zo's own service
    runner).
-3. Create one Zo public service that forwards `https://mcp-ph.zocomputer.io`
+3. Create one Zo public service that forwards `https://mcp.example.com`
    to `localhost:8080`. The reverse proxy must pass requests for every path
-   (`/omg`, `/.well-known/…`, `/healthz`).
+   (`/omg`, `/oauth/…`, `/.well-known/…`, `/healthz`) and must not rewrite
+   redirects: the OAuth flow bounces the browser between Google, the gateway
+   and the MCP client using `public_url`.
 4. Decommission the per-server Zo services and their obscure URLs.
 
 The gateway validates the `Host` header (DNS-rebinding protection). It accepts
@@ -381,10 +470,11 @@ reach a backend):
 
 1. **Bearer token present?** No → `401` with
    `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/<path>", scope="…"`.
-2. **Token valid for this resource?** Signature against the issuer's JWKS,
-   `iss`, `exp`/`nbf`, and `aud` must contain this server's `resource`
-   (trailing slash and scheme/host case are normalized, nothing else). No →
-   `401 invalid_token`. Keys unreachable → `503` (never a silent allow).
+2. **Token valid for this resource?** Signature against the issuer's keys
+   (the gateway's own key in built-in mode), `iss`, `exp`/`nbf`, and `aud`
+   must contain this server's `resource` (trailing slash and scheme/host case
+   are normalized, nothing else). No → `401 invalid_token`. External keys
+   unreachable → `503` (never a silent allow).
 3. **Who is it?** `sub` (then email) is resolved to a `users` entry; the server's
    `allowed_users` and `scopes` are checked. No → `403` (`insufficient_scope`
    challenge when a scope is the problem).
@@ -394,8 +484,10 @@ reach a backend):
    anyone who passed step 3.
 
 Each decision produces one `audit` log line with subject, user, server,
-method, tool, allow/deny, reason, latency and backend error. Tokens are never
-logged; tool arguments only with `logging.log_arguments: true`.
+method, tool, allow/deny, reason, latency and backend error. The built-in
+authorization server logs `stage=authn` lines for registrations, logins,
+consents, token issuance and every denial under `server=oauth`. Tokens are
+never logged; tool arguments only with `logging.log_arguments: true`.
 
 The policy layer is an interface (`policy::Authorizer`) that receives
 `{principal, server, method, tool, arguments}`, so argument-level rules or an
@@ -405,16 +497,21 @@ transport code.
 ## Operations
 
 ```sh
-host-my-mcp check        # validate config, print mounts and resources
+host-my-mcp check        # validate config, print mounts, resources and the Google redirect URI
 host-my-mcp metadata     # print each RFC 9728 document the gateway will serve
 host-my-mcp              # serve
 RUST_LOG=info,audit=info,backend=warn host-my-mcp
 ```
 
 - `GET /healthz` → `ok`
-- `GET /status` → JSON with each backend's state (`stopped` / `running` /
-  `failed`), pid, uptime, restarts in the current window, last exit reason,
-  and live session count.
+- `GET /status` → JSON with `auth` (`builtin` / `oauth` / `disabled`) and
+  each backend's state (`stopped` / `running` / `failed`), pid, uptime,
+  restarts in the current window, last exit reason, and live session count.
+- `state_dir/signing-key.pkcs8`: delete to rotate the signing key (every
+  issued access token becomes invalid; clients refresh transparently).
+- `state_dir/oauth-state.json`: registered clients, hashed refresh tokens,
+  consents. Delete a client entry to force it to re-register; delete the file
+  to log everyone out.
 
 Backends are spawned lazily (or eagerly with `start: eager`), restarted on
 exit within `restart.max_restarts` per `window_secs`, and then marked failed
@@ -447,23 +544,42 @@ stopped.
   behind the same `Authorizer` interface.
 - **Token passthrough is never done.** Backends receive no token; they get
   whatever credentials their own `env` configures.
-- **One Auth0 API per path** is the recommended model (tokens bound by
-  `aud`). A single API with per-server scopes also works (`resource:` +
-  `scopes:`), but then every path shares one audience.
+- **Open registration.** Anyone who can reach the gateway can register a
+  client; that is how MCP clients work. A registration grants nothing: the
+  human still has to pass Google, be listed under `users`, be in the mount's
+  `allowed_users`, and approve that client on the consent page. Registrations
+  are capped (least recently used evicted) so the state file cannot grow
+  unbounded. Client ID Metadata Documents (URL client ids) are not supported
+  yet; clients fall back to registration.
+- **Startup needs the provider.** Provider discovery runs at startup and a
+  failure is fatal, so a broken `issuer` is caught immediately. A transient
+  network outage at boot therefore delays startup until your process manager
+  retries.
+- **Refresh tokens are always issued** by the built-in server, whether or not
+  the client asked for `offline_access`, so clients stay connected for
+  `refresh_token_ttl_secs` without re-prompting (the hourly re-login seen with
+  some external issuers came from clients not requesting that scope).
+- **Login state is in memory.** Pending logins and authorization codes live
+  for ten and five minutes respectively and do not survive a restart; clients
+  simply start over. Clients, refresh tokens and consents are persisted.
 
 ## Development
 
 ```sh
-cargo test                 # unit tests + end-to-end tests (spawn the echo binary, mint RS256 JWTs)
+cargo test                 # unit tests + end-to-end tests (spawn the echo binary, run a fake OpenID provider)
 cargo clippy --all-targets
 ```
 
 The end-to-end tests cover the unauthenticated bridge, per-session progress
-routing with two concurrent clients, crash → restart → budget exhaustion, and
-the OAuth surface (challenge header, metadata document, wrong audience,
-unknown identity, missing scope, happy path), and CORS for browser clients
-(preflight, cross-origin-readable 401 challenge and metadata, unlisted origins
-and empty allowlists get no CORS headers).
+routing with two concurrent clients, crash → restart → budget exhaustion, the
+resource-server surface against an external issuer (challenge header, metadata
+document, wrong audience, unknown identity, missing scope, happy path), CORS
+for browser clients, and the built-in authorization server against a fake
+Google-shaped provider (discovery, registration, PKCE, upstream login with
+nonce and PKCE, consent and remembered consent, code redemption, audience
+binding at the mounts, refresh rotation and replay, scope grants, unknown
+identities, forbidden servers, invalid resources, confidential clients, state
+persistence across restarts).
 
 ## License
 

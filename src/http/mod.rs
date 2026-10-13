@@ -26,8 +26,9 @@ use crate::{
     },
     backend::{Backend, BackendSpec, BackendStatus},
     bridge::{ServerContext, registry::SessionRegistry},
-    config::{Config, Start},
+    config::{AuthMode, Config, Start},
     http::cors::OriginAllowlist,
+    oauth::AuthorizationServer,
     policy::StaticPolicy,
 };
 
@@ -76,28 +77,48 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
     }
     let policy = StaticPolicy::from_config(&config);
 
-    let validator: Option<Arc<TokenValidator>> = if config.auth.disabled {
-        tracing::warn!(
-            "AUTHENTICATION IS DISABLED (auth.disabled: true); every request is anonymous"
-        );
-        None
-    } else {
-        let jwks_uri = config
-            .auth
-            .jwks_uri()
-            .ok_or_else(|| anyhow::anyhow!("cannot derive jwks_uri from issuer"))?;
-        let cache = JwksCache::new(
-            jwks_uri.clone(),
-            Duration::from_secs(config.auth.jwks_min_refresh_secs),
-            Duration::from_secs(config.auth.jwks_max_age_secs),
-        );
-        match cache.warm().await {
-            Ok(n) => tracing::info!(%jwks_uri, keys = n, "loaded signing keys"),
-            Err(e) => {
-                tracing::warn!(%jwks_uri, error = %e, "could not load signing keys at startup; will retry on first request (requests fail closed until then)")
-            }
+    let mut authorization_server: Option<Arc<AuthorizationServer>> = None;
+    let validator: Option<Arc<TokenValidator>> = match config.auth.mode() {
+        AuthMode::Disabled => {
+            tracing::warn!(
+                "AUTHENTICATION IS DISABLED (auth.disabled: true); every request is anonymous"
+            );
+            None
         }
-        Some(Arc::new(TokenValidator::new(&config.auth, cache)?))
+        AuthMode::BuiltIn => {
+            let server = AuthorizationServer::build(&config, policy.clone()).await?;
+            tracing::info!(
+                issuer = %server.issuer,
+                providers = ?config.auth.providers.keys().collect::<Vec<_>>(),
+                "built-in OAuth 2.1 authorization server enabled"
+            );
+            let validator = TokenValidator::with_issuer(
+                server.issuer.clone(),
+                vec![server.algorithm()],
+                &config.auth,
+                server.key_source(),
+            );
+            authorization_server = Some(server);
+            Some(Arc::new(validator))
+        }
+        AuthMode::External => {
+            let jwks_uri = config
+                .auth
+                .jwks_uri()
+                .ok_or_else(|| anyhow::anyhow!("cannot derive jwks_uri from issuer"))?;
+            let cache = JwksCache::new(
+                jwks_uri.clone(),
+                Duration::from_secs(config.auth.jwks_min_refresh_secs),
+                Duration::from_secs(config.auth.jwks_max_age_secs),
+            );
+            match cache.warm().await {
+                Ok(n) => tracing::info!(%jwks_uri, keys = n, "loaded signing keys"),
+                Err(e) => {
+                    tracing::warn!(%jwks_uri, error = %e, "could not load signing keys at startup; will retry on first request (requests fail closed until then)")
+                }
+            }
+            Some(Arc::new(TokenValidator::new(&config.auth, cache)?))
+        }
     };
 
     let public_origin = config.public_origin();
@@ -198,15 +219,18 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
         servers,
         metadata,
     });
-    let router = router
+    let mut router = router
         .route(
             "/.well-known/oauth-protected-resource/{*path}",
             get(protected_resource_metadata),
         )
         .route("/healthz", get(|| async { "ok" }))
         .route("/status", get(status))
-        .with_state(state.clone())
-        .layer(TraceLayer::new_for_http());
+        .with_state(state.clone());
+    if let Some(server) = &authorization_server {
+        router = router.merge(server.router());
+    }
+    let router = router.layer(TraceLayer::new_for_http());
     // Outermost so preflights never reach the auth layer (browsers send no
     // Authorization on OPTIONS) and so 401/403/404 responses carry CORS headers.
     let router = if cors_allowlist.is_empty() {
@@ -262,10 +286,10 @@ struct ServerStatus {
 async fn status(State(st): State<Arc<AppState>>) -> Json<Status> {
     Json(Status {
         version: env!("CARGO_PKG_VERSION"),
-        auth: if st.config.auth.disabled {
-            "disabled"
-        } else {
-            "oauth"
+        auth: match st.config.auth.mode() {
+            AuthMode::Disabled => "disabled",
+            AuthMode::External => "oauth",
+            AuthMode::BuiltIn => "builtin",
         },
         servers: st
             .servers

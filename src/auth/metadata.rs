@@ -23,7 +23,7 @@ impl ProtectedResourceMetadata {
         let auth: &Auth = &cfg.auth;
         Self {
             resource: server.resource().as_str().trim_end_matches('/').to_string(),
-            authorization_servers: auth.issuer.iter().map(|u| u.as_str().to_string()).collect(),
+            authorization_servers: cfg.authorization_server().into_iter().collect(),
             scopes_supported: server.advertised_scopes(auth).to_vec(),
             bearer_methods_supported: vec!["header".into()],
             resource_name: Some(format!("{name} (host-my-mcp)")),

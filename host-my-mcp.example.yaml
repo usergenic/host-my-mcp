@@ -5,32 +5,47 @@
 listen:
   host: 127.0.0.1          # bind address; Zo's public service forwards to this port
   port: 8080
-  # allowed_hosts: ["mcp-ph.zocomputer.io"]   # extra Host header values; ["*"] disables the check
+  # allowed_hosts: ["mcp.example.com"]   # extra Host header values; ["*"] disables the check
   # Browser origins; also the CORS allowlist (empty = no Origin check, no CORS headers).
   # `scheme://host`, `scheme://host:port` or `scheme://host:*`; "*" is rejected.
   # allowed_origins: ["http://localhost:5173", "https://app.example.com"]
 
 # The public origin MCP clients use. No path, no trailing slash.
-public_url: https://mcp-ph.zocomputer.io
+public_url: https://mcp.example.com
 
 auth:
-  # Auth0 tenant issuer. Keep the trailing slash exactly as Auth0 prints it.
-  issuer: https://${AUTH0_TENANT}.us.auth0.com/
-  # jwks_uri defaults to <issuer>.well-known/jwks.json
-  # The claim that carries the user's email. Auth0 access tokens only include
-  # one if an Action adds it (see README → Auth0 setup → step 7).
-  email_claim: https://host-my-mcp/email
+  # Built-in OAuth 2.1 authorization server: MCP clients register with the
+  # gateway and sign in through one of these OpenID Connect providers.
+  # README → "Google sign-in setup" walks through creating the Google client;
+  # its Authorized redirect URI must be <public_url>/oauth/callback.
+  providers:
+    google:
+      issuer: https://accounts.google.com
+      client_id: ${GOOGLE_CLIENT_ID}
+      client_secret: ${GOOGLE_CLIENT_SECRET}
+      # scopes: [openid, email, profile]
+      # display_name: Google
+      # require_verified_email: true
+  # state_dir: ~/.local/state/host-my-mcp   # signing key, clients, refresh tokens, consents
+  # access_token_ttl_secs: 3600
+  # refresh_token_ttl_secs: 2592000         # 30 days without a new Google login
+  # dynamic_registration: true
+  #
+  # Alternatively, an external authorization server (mutually exclusive with providers):
+  # issuer: https://YOUR_TENANT.us.auth0.com/
+  # email_claim: https://host-my-mcp/email
+  #
   # disabled: true          # local development only; every caller becomes `anonymous`
 
 users:
   brendan:
-    subjects:
-      - "google-oauth2|${BRENDAN_GOOGLE_SUB}"   # the stable `sub`; see README "finding your sub"
     emails:
-      - brendan@example.com                     # convenience match on the email claim
+      - brendan@example.com                     # the Google account(s) allowed in (provider-verified)
+    # subjects:
+    #   - "google|${BRENDAN_GOOGLE_SUB:-}"        # stable account id; shown on the "not allowed" page / audit log
 
 servers:
-  # Each key becomes a path (/omg) and an OAuth resource (https://mcp-ph.zocomputer.io/omg).
+  # Each key becomes a path (/omg) and an OAuth resource (https://mcp.example.com/omg).
   omg:
     command: omg
     args: ["mcp", "-C", "/home/zo/notes"]
