@@ -234,6 +234,7 @@ audit: server=oauth stage=authn outcome=deny subject=google|1057… user=- detai
 | **Error 403: org_internal** | Audience is *Internal* and the account is outside the Workspace organization. Use *External*, or sign in with an organization account. |
 | **Error 401: invalid_client** / *"The OAuth client was not found"* | Client ID or secret is wrong or belongs to another project. Re-copy both; make sure the env vars are set in the gateway's environment, not just your shell. |
 | **"This app isn't verified"** interstitial | Only appears if you publish the app to production with sensitive scopes. The gateway uses none; stay in Testing mode or publish without extra scopes. |
+| Console: *"Loading the script …/cdn-cgi/scripts/…/email-decode.min.js violates … default-src"* or *beacon.min.js* | Harmless. A CDN in front of the gateway (Cloudflare) injects its own scripts into the consent page and the page's Content Security Policy blocks them. The gateway sends `Cache-Control: no-transform` to ask it not to; you can also turn off *Email Address Obfuscation* and *Web Analytics* for the zone. |
 | Gateway page **"Sign-in expired"** | More than ten minutes passed between opening the client and finishing login, or the gateway restarted mid-flow. Reconnect from the client. |
 | Gateway page **"This account is not allowed"** | Working as intended: add the shown email or subject to `users`, restart, reconnect. |
 

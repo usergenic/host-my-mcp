@@ -4,6 +4,23 @@ All notable changes to `host-my-mcp` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump may break).
 
+## [0.3.1] - 2026-10-13
+
+### Fixed
+- **Consent page could not complete in Chrome.** The consent page's Content
+  Security Policy included `form-action 'self'`; Chrome also applies that
+  directive to the redirect that follows the form POST, and the post-consent
+  redirect goes to the MCP client's callback (`https://chatgpt.com/…`,
+  `http://localhost:…`), so the browser stayed on the callback URL and a second
+  click on *Allow* got `400 Sign-in expired` because the first one had already
+  consumed the login. The directive is gone; the rest of the policy is
+  unchanged.
+- Pages are served with `Cache-Control: no-store, no-transform` and email
+  addresses are wrapped in Cloudflare's `email_off` markers, so a CDN's HTML
+  rewriting (email obfuscation, injected analytics scripts) neither mangles the
+  identity shown on the consent page nor trips the CSP. README troubleshooting
+  row added.
+
 ## [0.3.0] - 2026-10-13
 
 ### Added

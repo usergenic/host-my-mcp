@@ -463,7 +463,12 @@ async fn full_dance_with_google_shaped_provider() {
         .authorize_through_login(&challenge, &[&echo_resource], None)
         .await;
     assert_eq!(resp.status(), 200, "first time: consent page");
-    assert_eq!(resp.headers()["cache-control"], "no-store");
+    assert_eq!(resp.headers()["cache-control"], "no-store, no-transform");
+    let csp = resp.headers()["content-security-policy"].to_str().unwrap();
+    assert!(
+        !csp.contains("form-action"),
+        "Chrome applies form-action to the post-consent redirect: {csp}"
+    );
     let consent = resp.text().await.unwrap();
     assert!(consent.contains("MCP Inspector"), "{consent}");
     assert!(consent.contains("brendan@example.com"), "{consent}");

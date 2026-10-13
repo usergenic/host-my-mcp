@@ -7,6 +7,13 @@ use axum::{
 
 use super::util::html_escape as esc;
 
+/// Escape, and wrap in the comment markers Cloudflare's Email Address
+/// Obfuscation honours, so an email shown on a page is not rewritten into
+/// `[email protected]` by an intermediary.
+fn esc_email(s: &str) -> String {
+    format!("<!--email_off-->{}<!--/email_off-->", esc(s))
+}
+
 const STYLE: &str = r#"
 :root{color-scheme:light dark;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;background:Canvas;color:CanvasText}
@@ -29,11 +36,19 @@ pub fn page(status: StatusCode, title: &str, body: &str) -> Response {
     );
     let mut resp = (status, Html(html)).into_response();
     let h = resp.headers_mut();
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // `no-transform` asks intermediaries (Cloudflare and similar) not to
+    // rewrite the HTML: their injected scripts would be blocked by the CSP
+    // below, and email obfuscation would mangle the identity we show.
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-transform"),
+    );
+    // No `form-action`: Chrome applies it to the redirect that follows the
+    // consent POST, and that redirect goes to the MCP client's callback.
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     h.insert(
@@ -60,7 +75,7 @@ pub fn error_page(
             body.push_str(&format!(
                 "<p class=\"muted\">{}</p><p><code>{}</code></p>",
                 esc(k),
-                esc(v)
+                esc_email(v)
             ));
         }
         body.push_str("</div>");
@@ -93,7 +108,7 @@ pub fn consent_page(v: &ConsentView<'_>) -> Response {
     );
     body.push_str(&format!(
         "<p>You are signed in as <strong>{}</strong>.</p>",
-        esc(v.identity_label)
+        esc_email(v.identity_label)
     ));
     body.push_str("<div class=\"card\"><p class=\"muted\">This application</p>");
     body.push_str(&format!("<p>{}</p>", esc(v.client_name)));

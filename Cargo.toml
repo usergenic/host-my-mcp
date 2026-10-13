@@ -1,6 +1,6 @@
 [package]
 name = "host-my-mcp"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.88"
 description = "One public Streamable HTTP MCP gateway with a built-in OAuth 2.1 authorization server (sign in with Google or any OIDC provider), per-server and per-tool authorization, routing paths to local stdio MCP servers"
