@@ -568,7 +568,7 @@ async fn full_dance_with_google_shaped_provider() {
     assert_eq!(claims["aud"][0], echo_resource);
     assert_eq!(claims["client_id"], flow.client_id);
 
-    // Refresh rotates; the old refresh token dies.
+    // Refresh rotates to a new pair; the replacement works.
     let (status, tok2) = flow
         .token(&[
             ("grant_type", "refresh_token"),
@@ -585,22 +585,33 @@ async fn full_dance_with_google_shaped_provider() {
         .cancel()
         .await
         .unwrap();
-    let (status, body) = flow
+
+    // A rotation response can be lost in transit: replaying the old token
+    // inside the grace window recovers a fresh pair (consuming the still
+    // unused replacement) instead of bricking the family.
+    let (status, tok3) = flow
         .token(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", &refresh),
             ("client_id", &flow.client_id),
         ])
         .await;
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(body["error"], "invalid_grant");
+    assert_eq!(status, 200, "{tok3}");
+    let refresh3 = tok3["refresh_token"].as_str().unwrap();
+    assert_ne!(refresh3, refresh2);
+    connect(&echo_resource, tok3["access_token"].as_str().unwrap())
+        .await
+        .expect("grace-window recovered token works")
+        .cancel()
+        .await
+        .unwrap();
 
     // Refresh may not widen to a resource that was not authorized.
     let locked = gw.url("/locked");
     let (status, body) = flow
         .token(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", refresh2),
+            ("refresh_token", refresh3),
             ("client_id", &flow.client_id),
             ("resource", &locked),
         ])

@@ -4,6 +4,27 @@ All notable changes to `host-my-mcp` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump may break).
 
+## [0.4.0] - 2026-11-06
+
+### Fixed
+- **A dropped rotation response no longer bricks a refresh-token family.**
+  Refresh tokens rotate on every use; if the rotation response was lost in
+  transit the client was left holding a dead token (the old one already
+  deleted, the new one known to nobody) and had to sign in again. The
+  superseded token may now be replayed for a short grace window to recover the
+  new pair, as long as its replacement has not yet been used; a replay mints a
+  fresh pair so the chain keeps moving and there is never more than one live
+  token per grant. A replayed token presented by a different client still
+  revokes the family, and the identity and scope/resource checks are unchanged.
+
+### Added
+- **`auth.refresh_token_rotation_grace_secs`** (default `60`) controls that
+  grace window. Set it to `0` for strict one-time rotation with no grace. The
+  tradeoff: within the window a stolen pre-rotation token whose replacement is
+  still unused can be replayed once (same client, scopes, resources, expiry) —
+  the standard pragmatic exception to one-time redemption. README config table
+  and behavior notes updated.
+
 ## [0.3.1] - 2026-10-13
 
 ### Fixed

@@ -282,6 +282,7 @@ servers:
 | `state_dir` | `$XDG_STATE_HOME/host-my-mcp` or `~/.local/state/host-my-mcp` | signing key, registered clients, refresh tokens, consents (files are `0600`) |
 | `access_token_ttl_secs` | `3600` | lifetime of access tokens |
 | `refresh_token_ttl_secs` | `2592000` (30 days) | how long a client stays signed in without a new Google login; refresh tokens rotate on every use |
+| `refresh_token_rotation_grace_secs` | `60` | seconds a just-rotated refresh token may still be replayed to recover a rotation response lost in transit (which would otherwise brick the token family); the old token is honoured only while its replacement is unused; `0` disables (strict one-time rotation) |
 | `dynamic_registration` | `true` | serve RFC 7591 registration; every current MCP client needs it |
 | `disabled` | `false` | run without authentication (local only); every caller is `anonymous` |
 | `issuer`, `jwks_uri`, `algorithms`, `email_claim`, `leeway_secs`, `jwks_*` | | external authorization server mode, see [below](#external-authorization-server-instead); `issuer` and `providers` are mutually exclusive |
@@ -560,6 +561,12 @@ stopped.
   the client asked for `offline_access`, so clients stay connected for
   `refresh_token_ttl_secs` without re-prompting (the hourly re-login seen with
   some external issuers came from clients not requesting that scope).
+- **Refresh rotation tolerates a dropped response.** Tokens rotate on every
+  use; if the rotation response is lost in transit the client would normally be
+  left holding a dead token and have to sign in again. For
+  `refresh_token_rotation_grace_secs` (default 60) the superseded token may be
+  replayed to recover the new pair, as long as its replacement has not yet been
+  used. Set it to `0` for strict one-time rotation with no grace.
 - **Login state is in memory.** Pending logins and authorization codes live
   for ten and five minutes respectively and do not survive a restart; clients
   simply start over. Clients, refresh tokens and consents are persisted.

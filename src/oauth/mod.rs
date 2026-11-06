@@ -91,7 +91,7 @@ impl AuthorizationServer {
     pub async fn build(cfg: &Config, policy: Arc<dyn Authorizer>) -> anyhow::Result<Arc<Self>> {
         let dir = cfg.auth.state_dir();
         let signer = Signer::load_or_create(&dir)?;
-        let store = Store::open(&dir)?;
+        let store = Store::open(&dir, cfg.auth.refresh_token_rotation_grace_secs)?;
         let (clients, refresh, consents) = store.counts();
         tracing::info!(state_dir = %dir.display(), clients, refresh_tokens = refresh, consents, "authorization server state loaded");
 
@@ -287,10 +287,20 @@ impl AuthorizationServer {
 
     /// Issue a refresh token for `grant`, expiring at `expires_at`
     /// (`None` = `refresh_ttl` from now). Rotation keeps the original expiry.
-    pub fn issue_refresh_token(&self, grant: &Grant<'_>, expires_at: Option<u64>) -> String {
+    /// When `rotated_from` is `Some`, the rotation is recorded so a replay
+    /// of the old token inside the configured grace window
+    /// (`auth.refresh_token_rotation_grace_secs`) can recover a lost
+    /// rotation response (see `Store::consume_rotated`).
+    pub fn issue_refresh_token(
+        &self,
+        grant: &Grant<'_>,
+        expires_at: Option<u64>,
+        rotated_from: Option<&str>,
+    ) -> String {
         let token = format!("hmr_{}", util::random_token(32));
+        let hash = util::hash_secret(&token);
         self.store.insert_refresh(
-            util::hash_secret(&token),
+            hash.clone(),
             store::RefreshToken {
                 client_id: grant.client_id.to_string(),
                 scopes: grant.scopes.to_vec(),
@@ -301,6 +311,9 @@ impl AuthorizationServer {
                 expires_at: expires_at.unwrap_or_else(|| util::now() + self.refresh_ttl),
             },
         );
+        if let Some(old) = rotated_from {
+            self.store.record_rotation(old, &hash);
+        }
         token
     }
 

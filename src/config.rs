@@ -138,6 +138,13 @@ pub struct Auth {
     /// without a new Google login).
     #[serde(default = "default_refresh_token_ttl")]
     pub refresh_token_ttl_secs: u64,
+    /// Seconds a just-rotated refresh token may still be replayed to recover a
+    /// rotation response lost in transit (which would otherwise brick the whole
+    /// token family until a fresh login). The superseded token is honoured only
+    /// while its replacement is still unused. `0` disables the grace window
+    /// (strict one-time rotation).
+    #[serde(default = "default_rotation_grace")]
+    pub refresh_token_rotation_grace_secs: u64,
     /// Accept RFC 7591 dynamic client registration (built-in server only).
     /// Every MCP client in common use relies on it; registration is open but
     /// grants nothing by itself, since every login still passes the identity
@@ -177,6 +184,9 @@ fn default_access_token_ttl() -> u64 {
 }
 fn default_refresh_token_ttl() -> u64 {
     30 * 24 * 3600
+}
+fn default_rotation_grace() -> u64 {
+    60
 }
 
 /// How the gateway authenticates requests, derived from `auth`.
@@ -222,6 +232,7 @@ impl Default for Auth {
             state_dir: None,
             access_token_ttl_secs: default_access_token_ttl(),
             refresh_token_ttl_secs: default_refresh_token_ttl(),
+            refresh_token_rotation_grace_secs: default_rotation_grace(),
             dynamic_registration: true,
         }
     }

@@ -833,7 +833,7 @@ pub async fn token(State(s): Server, headers: HeaderMap, body: Bytes) -> Respons
                 scopes: &auth.scopes,
                 resources: &resources,
             };
-            let refresh = s.issue_refresh_token(&grant, None);
+            let refresh = s.issue_refresh_token(&grant, None, None);
             audit::authn(
                 AUDIT_SERVER,
                 "token",
@@ -854,7 +854,26 @@ pub async fn token(State(s): Server, headers: HeaderMap, body: Bytes) -> Respons
                     "refresh_token is required",
                 );
             };
-            let Some(stored) = s.store().consume_refresh(&hash_secret(rt)) else {
+            let hash = hash_secret(rt);
+            let Some(stored) = s
+                .store()
+                .consume_refresh(&hash)
+                // Rotation response may have been lost in transit: if this
+                // token was rotated within the grace window and its
+                // replacement is still unused, recover by consuming the
+                // replacement instead. Execution then falls through to the
+                // normal refresh path below (client/identity checks, scope
+                // and resource narrowing, fresh pair minted).
+                .or_else(|| {
+                    let recovered = s.store().consume_rotated(&hash);
+                    if recovered.is_some() {
+                        tracing::info!(
+                            "refresh token replayed inside rotation grace window; recovered"
+                        );
+                    }
+                    recovered
+                })
+            else {
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
@@ -919,7 +938,7 @@ pub async fn token(State(s): Server, headers: HeaderMap, body: Bytes) -> Respons
                 scopes: &scopes,
                 resources: &resources,
             };
-            let refresh = s.issue_refresh_token(&grant, Some(stored.expires_at));
+            let refresh = s.issue_refresh_token(&grant, Some(stored.expires_at), Some(&hash));
             audit::authn(
                 AUDIT_SERVER,
                 "token",
