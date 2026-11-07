@@ -38,6 +38,8 @@ pub struct Config {
     /// Public origin clients use, e.g. `https://mcp.example.com`. No trailing slash.
     pub public_url: Url,
     #[serde(default)]
+    pub session: Session,
+    #[serde(default)]
     pub auth: Auth,
     #[serde(default)]
     pub users: BTreeMap<String, User>,
@@ -71,6 +73,36 @@ fn default_host() -> String {
 }
 fn default_port() -> u16 {
     8080
+}
+
+/// MCP session behaviour (the Streamable HTTP transport layer).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Session {
+    /// Idle timeout for an MCP session, in seconds: the session is closed after
+    /// this long with no traffic on it. The timer resets on every message, so
+    /// this bounds only *silence*, not total session length — an actively used
+    /// session never expires. `0` disables the idle timeout entirely (sessions
+    /// are reclaimed only by the client's `DELETE` or a gateway restart).
+    ///
+    /// rmcp's own default is 300s (5 min), which is shorter than the quiet gaps
+    /// between calls during normal agent think-time, so clients (Cursor in
+    /// particular) hit `Session not found` on their next request. The default
+    /// here is an hour.
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive_secs: u64,
+}
+
+fn default_keep_alive() -> u64 {
+    3600
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            keep_alive_secs: default_keep_alive(),
+        }
+    }
 }
 
 impl Default for Listen {

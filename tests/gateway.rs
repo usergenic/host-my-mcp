@@ -46,6 +46,9 @@ impl ClientHandler for Recorder {
 struct Gateway {
     addr: SocketAddr,
     _app_cancel: tokio_util::sync::CancellationToken,
+    /// Kept alive so the session-store files land in a throwaway dir, not
+    /// the developer's real `~/.local/state`.
+    _state_dir: tempfile::TempDir,
 }
 
 impl Gateway {
@@ -55,9 +58,26 @@ impl Gateway {
 }
 
 async fn start_gateway(yaml: impl Fn(u16) -> String) -> Gateway {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (addr, cancel) = spawn_gateway(yaml, state_dir.path()).await;
+    Gateway {
+        addr,
+        _app_cancel: cancel,
+        _state_dir: state_dir,
+    }
+}
+
+/// Build and serve a gateway whose state (including the session store) lives in
+/// `state_dir`. Returning just the address and cancel token lets a test tear an
+/// instance down and bring a fresh one up on the *same* `state_dir` — a restart.
+async fn spawn_gateway(
+    yaml: impl Fn(u16) -> String,
+    state_dir: &std::path::Path,
+) -> (SocketAddr, tokio_util::sync::CancellationToken) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let cfg = Config::parse(&yaml(addr.port())).expect("config parses");
+    let mut cfg = Config::parse(&yaml(addr.port())).expect("config parses");
+    cfg.auth.state_dir = Some(state_dir.to_path_buf());
     let app = build_app(cfg).await.expect("app builds");
     let cancel = app.cancel.clone();
     let backends = app.backends();
@@ -74,10 +94,7 @@ async fn start_gateway(yaml: impl Fn(u16) -> String) -> Gateway {
             .await
             .unwrap();
     });
-    Gateway {
-        addr,
-        _app_cancel: cancel,
-    }
+    (addr, cancel)
 }
 
 async fn connect(
@@ -809,5 +826,67 @@ fn wildcard_cors_origin_is_rejected_by_config() {
     assert!(
         err.contains("listen.allowed_origins") && err.contains("`*` is not accepted"),
         "{err}"
+    );
+}
+
+/// A session initialized against one gateway process is transparently restored
+/// by a *fresh* process sharing the same state dir — the durable session store
+/// replays the `initialize` handshake so the client's old `Mcp-Session-Id` is
+/// not rejected with 404 after a restart/deploy.
+#[tokio::test]
+async fn session_survives_restart_via_store() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let http = reqwest::Client::new();
+    let init = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "probe", "version": "0" }
+        }
+    });
+
+    // Instance 1: initialize, which persists the session to the store on disk.
+    let (addr1, cancel1) = spawn_gateway(no_auth_config, state_dir.path()).await;
+    let resp = http
+        .post(format!("http://{addr1}/echo"))
+        .header("Accept", "application/json, text/event-stream")
+        .json(&init)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "initialize should succeed");
+    let sid = resp
+        .headers()
+        .get("Mcp-Session-Id")
+        .expect("gateway assigns a session id")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Restart: drop instance 1, bring up a fresh one on the same state dir. Its
+    // in-memory session map is empty, but the store file still holds the session.
+    cancel1.cancel();
+    let (addr2, _cancel2) = spawn_gateway(no_auth_config, state_dir.path()).await;
+
+    // A request carrying the old session id is restored, not 404'd.
+    let resp = http
+        .post(format!("http://{addr2}/echo"))
+        .header("Accept", "application/json, text/event-stream")
+        .header("Mcp-Session-Id", &sid)
+        .header("Mcp-Protocol-Version", "2025-06-18")
+        .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        404,
+        "the old session id must be restored from the store, not rejected"
+    );
+    assert!(
+        resp.status().is_success(),
+        "restored tools/list should succeed, got {}",
+        resp.status()
     );
 }

@@ -2,6 +2,7 @@
 //! RFC 9728 metadata, health and status.
 
 pub mod cors;
+pub mod session_store;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -184,10 +185,31 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
         if !config.listen.allowed_origins.is_empty() {
             http_cfg = http_cfg.with_allowed_origins(config.listen.allowed_origins.clone());
         }
+        // Persist each session's `initialize` params so a client reconnecting
+        // after a gateway restart is transparently restored instead of 404ing;
+        // rmcp replays the handshake and re-bridges the backend. One file per
+        // mount under the state dir.
+        let session_file = config
+            .auth
+            .state_dir()
+            .join(format!("sessions-{name}.json"));
+        http_cfg.session_store = Some(Arc::new(session_store::FileSessionStore::open(
+            session_file,
+        )));
+
         let factory_ctx = ctx.clone();
+        // rmcp idle-kills a session after 5 minutes of silence by default, which
+        // is shorter than agent think-time; `session.keep_alive_secs` (default
+        // 3600, reset on every message) raises it, and `0` disables the idle
+        // timeout entirely.
+        let mut session_manager = LocalSessionManager::default();
+        session_manager.session_config.keep_alive = match config.session.keep_alive_secs {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        };
         let service = StreamableHttpService::new(
             move || Ok(factory_ctx.new_handler()),
-            Arc::new(LocalSessionManager::default()),
+            Arc::new(session_manager),
             http_cfg,
         );
 

@@ -279,7 +279,7 @@ servers:
 | `providers.<name>.scopes` | `[openid, email, profile]` | scopes requested from the provider; must include `openid` |
 | `providers.<name>.display_name` | capitalized `<name>` | label on the provider picker when several providers are configured |
 | `providers.<name>.require_verified_email` | `true` | refuse identities whose provider reports `email_verified: false` |
-| `state_dir` | `$XDG_STATE_HOME/host-my-mcp` or `~/.local/state/host-my-mcp` | signing key, registered clients, refresh tokens, consents (files are `0600`) |
+| `state_dir` | `$XDG_STATE_HOME/host-my-mcp` or `~/.local/state/host-my-mcp` | signing key, registered clients, refresh tokens, consents, and the MCP session store (files are `0600`); the session store is written regardless of auth mode |
 | `access_token_ttl_secs` | `3600` | lifetime of access tokens |
 | `refresh_token_ttl_secs` | `2592000` (30 days) | how long a client stays signed in without a new Google login; refresh tokens rotate on every use |
 | `refresh_token_rotation_grace_secs` | `60` | seconds a just-rotated refresh token may still be replayed to recover a rotation response lost in transit (which would otherwise brick the token family); the old token is honoured only while its replacement is unused; `0` disables (strict one-time rotation) |
@@ -295,6 +295,21 @@ servers:
 | `host`, `port` | `127.0.0.1`, `8080` | bind address |
 | `allowed_hosts` | `[]` | extra `Host` header values to accept (the `public_url` host, loopback and `host` are always accepted); `["*"]` disables the check |
 | `allowed_origins` | `[]` | browser origins, `scheme://host`, `scheme://host:port` or `scheme://host:*` (any port). Doubles as the **CORS allowlist**: listed origins get preflight answers and CORS headers, unlisted origins get neither and are rejected with 403. Empty = no Origin validation **and no CORS headers**. `"*"` and `"null"` are rejected at startup |
+
+### Session keys
+
+| key | default | meaning |
+| --- | --- | --- |
+| `session.keep_alive_secs` | `3600` | idle timeout for an MCP session: it is closed after this many seconds with no traffic. The timer resets on every message, so this bounds only silence, not total session length — an actively used session never expires. `0` disables the idle timeout entirely. The underlying library's own default is 300s (5 min), which is shorter than the quiet gaps during agent think-time and causes clients (Cursor especially) to hit `Session not found` on their next request |
+
+MCP sessions also survive a gateway restart: after each successful `initialize`
+the client's handshake parameters are written to `<state_dir>/sessions-<server>.json`
+(one file per mount, `0600`), and a request arriving after a restart with a
+still-known `Mcp-Session-Id` is transparently restored — the handshake is
+replayed and the backend re-attached — so the client does not have to
+re-initialize. Only the small handshake parameters are stored, never tokens or
+live process state; a `DELETE` (or a corrupt/missing file) simply drops the
+entry and the client re-initializes.
 
 ### Browser clients
 

@@ -4,6 +4,28 @@ All notable changes to `host-my-mcp` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump may break).
 
+## [0.5.0] - 2026-11-06
+
+### Fixed
+- **Sessions no longer die during agent think-time.** The Streamable HTTP
+  transport idle-closed a session after 5 minutes of silence (the underlying
+  library's default), so a client whose next request came after a longer quiet
+  gap — routine for agent workloads, Cursor especially — got `Session not
+  found` and could not reconnect. The idle timeout is now configurable and
+  defaults to an hour.
+
+### Added
+- **`session.keep_alive_secs`** (default `3600`) sets the session idle timeout.
+  The timer resets on every message, so it bounds only silence, not total
+  session length; `0` disables idle expiry entirely.
+- **Durable session store.** After each successful `initialize` the client's
+  handshake parameters are persisted to `<state_dir>/sessions-<server>.json`
+  (one file per mount, `0600`). A request that arrives after a gateway restart
+  with a still-known `Mcp-Session-Id` is transparently restored — the handshake
+  is replayed and the backend re-attached — so the client does not have to
+  re-initialize across a deploy. Only the small handshake parameters are
+  stored, never tokens or live process state.
+
 ## [0.4.0] - 2026-11-06
 
 ### Fixed
