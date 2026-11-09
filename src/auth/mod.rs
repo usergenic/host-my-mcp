@@ -13,5 +13,5 @@ pub mod token;
 
 pub use jwks::JwksCache;
 pub use metadata::{ProtectedResourceMetadata, challenge_header};
-pub use middleware::{AuthLayerState, require_auth};
+pub use middleware::{AuthLayerState, ServiceTokens, require_auth};
 pub use token::{TokenError, TokenValidator};

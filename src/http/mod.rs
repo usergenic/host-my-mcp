@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::{
     auth::{
-        AuthLayerState, JwksCache, ProtectedResourceMetadata, TokenValidator,
+        AuthLayerState, JwksCache, ProtectedResourceMetadata, ServiceTokens, TokenValidator,
         metadata::metadata_url, require_auth,
     },
     backend::{Backend, BackendSpec, BackendStatus},
@@ -151,6 +151,10 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
     let mut servers = Vec::new();
     let mut metadata = std::collections::HashMap::new();
 
+    // Static service tokens (auth.service_tokens) are shared across every mount;
+    // per-mount access is still gated by each server's `allowed_users`.
+    let service_tokens = Arc::new(ServiceTokens::from_config(&config.auth.service_tokens));
+
     for (name, server) in &config.servers {
         let spec = BackendSpec::from_config(name, server);
         let registry = SessionRegistry::new();
@@ -222,6 +226,7 @@ pub async fn build_app(config: Config) -> anyhow::Result<App> {
             scopes: server.advertised_scopes(&config.auth).to_vec(),
             validator: validator.clone(),
             policy: policy.clone(),
+            service_tokens: service_tokens.clone(),
         });
 
         let mount = Router::new()

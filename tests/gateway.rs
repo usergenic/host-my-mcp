@@ -890,3 +890,74 @@ async fn session_survives_restart_via_store() {
         resp.status()
     );
 }
+
+fn service_token_config(port: u16) -> String {
+    format!(
+        r#"
+listen: {{ host: 127.0.0.1, port: {port} }}
+public_url: http://127.0.0.1:{port}
+auth:
+  disabled: true
+  service_tokens:
+    ci:
+      token: "svc-secret-123"
+      user: ci-bot
+servers:
+  echo:
+    command: "{ECHO_BIN}"
+    allowed_users: ["ci-bot"]
+    tools:
+      allow: ["*"]
+"#
+    )
+}
+
+/// A static bearer token (auth.service_tokens) authenticates a service with no
+/// OAuth flow: it is admitted exactly where its `user` is in `allowed_users`,
+/// and anything else is refused.
+#[tokio::test]
+async fn static_service_token_authenticates_without_oauth() {
+    let gw = start_gateway(service_token_config).await;
+    let http = reqwest::Client::new();
+    let init = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "svc", "version": "0" }
+        }
+    });
+    let post = |bearer: Option<&'static str>| {
+        let req = http
+            .post(gw.url("/echo"))
+            .header("Accept", "application/json, text/event-stream")
+            .json(&init);
+        let req = match bearer {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        };
+        req.send()
+    };
+
+    // No token: the server does not allow "*", so an unauthenticated request is
+    // refused rather than silently admitted.
+    assert_ne!(
+        post(None).await.unwrap().status(),
+        200,
+        "no token must fail"
+    );
+
+    // The configured service token is admitted as ci-bot.
+    assert_eq!(
+        post(Some("svc-secret-123")).await.unwrap().status(),
+        200,
+        "service token authenticates without OAuth"
+    );
+
+    // A wrong token is refused.
+    assert_ne!(
+        post(Some("not-the-token")).await.unwrap().status(),
+        200,
+        "wrong token must fail"
+    );
+}

@@ -183,6 +183,33 @@ pub struct Auth {
     /// provider, `users`, and `allowed_users`.
     #[serde(default = "default_true")]
     pub dynamic_registration: bool,
+    /// Long-lived static bearer tokens for services that cannot run the OAuth
+    /// flow (CI, scripts). Each entry maps an opaque secret to a `user`; a
+    /// request presenting `Authorization: Bearer <token>` is authorized as that
+    /// user through the ordinary `allowed_users` and tool policy, skipping the
+    /// authorization-code dance. Independent of the auth mode (works with the
+    /// built-in server, an external issuer, or none). Revoke by removing the
+    /// entry and restarting.
+    #[serde(default)]
+    pub service_tokens: BTreeMap<String, ServiceToken>,
+}
+
+/// A static bearer token minted out-of-band for a non-interactive service.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceToken {
+    /// The opaque secret the service sends as `Authorization: Bearer <token>`.
+    /// Supply it via `${ENV}` rather than committing it; it is compared by hash
+    /// and never logged. Generate one with e.g. `openssl rand -hex 32`.
+    pub token: String,
+    /// The `users` identity this token acts as. A server admits it exactly when
+    /// its `allowed_users` lists this name (or `"*"`); the name needs no entry
+    /// under `users` since a static token carries its own identity.
+    pub user: String,
+    /// Scopes granted to requests bearing this token. Must cover any server's
+    /// required `scopes`.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// One upstream OpenID Connect provider used by the built-in authorization
@@ -266,6 +293,7 @@ impl Default for Auth {
             refresh_token_ttl_secs: default_refresh_token_ttl(),
             refresh_token_rotation_grace_secs: default_rotation_grace(),
             dynamic_registration: true,
+            service_tokens: BTreeMap::new(),
         }
     }
 }
@@ -589,6 +617,27 @@ impl Config {
         crate::http::cors::OriginAllowlist::parse(&self.listen.allowed_origins)
             .map_err(|e| ConfigError::Invalid(format!("listen.allowed_origins: {e}")))?;
 
+        for (name, t) in &self.auth.service_tokens {
+            if t.token.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.service_tokens.{name}: token must not be empty"
+                )));
+            }
+            if t.user.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.service_tokens.{name}: user is required"
+                )));
+            }
+        }
+        // Service-token identities are valid `allowed_users` / `user_tools`
+        // targets even without a `users` entry, since the token self-declares.
+        let service_users: std::collections::BTreeSet<String> = self
+            .auth
+            .service_tokens
+            .values()
+            .map(|t| t.user.clone())
+            .collect();
+
         if self.servers.is_empty() {
             return Err(ConfigError::Invalid(
                 "at least one server must be configured".into(),
@@ -643,16 +692,16 @@ impl Config {
                 )));
             }
             for u in &server.allowed_users {
-                if u != "*" && !self.users.contains_key(u) {
+                if u != "*" && !self.users.contains_key(u) && !service_users.contains(u) {
                     return Err(ConfigError::Invalid(format!(
-                        "server `{name}`: allowed_users entry `{u}` is not defined under `users`"
+                        "server `{name}`: allowed_users entry `{u}` is not defined under `users` or `auth.service_tokens`"
                     )));
                 }
             }
             for u in server.user_tools.keys() {
-                if !self.users.contains_key(u) {
+                if !self.users.contains_key(u) && !service_users.contains(u) {
                     return Err(ConfigError::Invalid(format!(
-                        "server `{name}`: user_tools entry `{u}` is not defined under `users`"
+                        "server `{name}`: user_tools entry `{u}` is not defined under `users` or `auth.service_tokens`"
                     )));
                 }
             }

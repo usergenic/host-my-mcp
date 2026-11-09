@@ -368,6 +368,42 @@ authorization server use `<provider>|<provider's sub>`, e.g.
 `users.<name>.subjects` or `users.<name>.emails` works. Subjects are stable
 even if the account's email changes; emails are easier to type.
 
+### Static service tokens (no OAuth flow)
+
+For services that cannot run the browser OAuth dance — CI jobs, cron scripts,
+anything that just wants to send `Authorization: Bearer <token>` — declare a
+long-lived static token under `auth.service_tokens`:
+
+```yaml
+auth:
+  # ... providers / issuer / disabled as usual ...
+  service_tokens:
+    ci:
+      token: ${CI_TOKEN}      # opaque secret you generate, injected from the env
+      user: ci-bot            # the identity this token acts as
+      scopes: [omg:use]       # optional; must cover any server's required scopes
+
+servers:
+  omg:
+    allowed_users: [ci-bot]   # gate the service exactly like any other user
+```
+
+Generate the secret with e.g. `openssl rand -hex 32`, give it to the service,
+and reference it from the config via `${CI_TOKEN}`. The gateway stores only its
+hash and compares in constant time; the raw value is never logged. A request
+bearing the token is authorized as `user` through the normal `allowed_users`
+and tool policy — it is admitted only on servers that list that user (or `"*"`),
+and per-tool `allow`/`deny` and `user_tools` apply unchanged. The `user` name
+needs no `users` entry; the token self-declares its identity (subject
+`service|<name>`).
+
+Service tokens work in every auth mode (built-in, external issuer, or
+`disabled`) and are independent of the OAuth machinery, so they neither rotate
+nor expire. **Revoke** one by removing its entry and restarting the gateway.
+Because a static bearer is a standing credential, scope each token to the least
+set of servers and tools it needs, and prefer the OAuth flow for anything
+interactive.
+
 ## How the built-in authorization server works
 
 The gateway implements the authorization-server half of the

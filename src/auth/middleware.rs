@@ -20,11 +20,69 @@ use axum::{
 };
 use url::Url;
 
+use std::collections::BTreeMap;
+
 use super::{metadata::challenge_header, token::TokenValidator};
 use crate::{
     audit,
+    config::ServiceToken,
+    oauth::util::hash_secret,
     policy::{Authorizer, Decision, Principal},
 };
+
+/// The identity a matched static service token resolves to.
+struct ServiceIdentity {
+    subject: String,
+    user: String,
+    scopes: Vec<String>,
+}
+
+/// Static bearer tokens for non-interactive services (`auth.service_tokens`),
+/// indexed by `hash_secret(token)` so the raw secrets are not held in memory.
+#[derive(Default)]
+pub struct ServiceTokens {
+    by_hash: std::collections::HashMap<String, ServiceIdentity>,
+}
+
+impl ServiceTokens {
+    /// Build the lookup from config. The map key names the service and becomes
+    /// the token's synthetic subject (`service|<name>`).
+    pub fn from_config(tokens: &BTreeMap<String, ServiceToken>) -> Self {
+        let by_hash = tokens
+            .iter()
+            .map(|(name, t)| {
+                (
+                    hash_secret(&t.token),
+                    ServiceIdentity {
+                        subject: format!("service|{name}"),
+                        user: t.user.clone(),
+                        scopes: t.scopes.clone(),
+                    },
+                )
+            })
+            .collect();
+        Self { by_hash }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_hash.is_empty()
+    }
+
+    /// Resolve a presented bearer token to its service principal, if it is one.
+    /// The lookup is keyed by the token's hash, so a miss reveals nothing about
+    /// any configured secret.
+    fn principal_for(&self, token: &str) -> Option<Principal> {
+        let id = self.by_hash.get(&hash_secret(token))?;
+        Some(Principal {
+            subject: id.subject.clone(),
+            email: None,
+            // A static token carries its own identity; do not re-resolve it.
+            user: Some(id.user.clone()),
+            scopes: id.scopes.clone(),
+            claims: Default::default(),
+        })
+    }
+}
 
 pub struct AuthLayerState {
     pub server: String,
@@ -34,6 +92,8 @@ pub struct AuthLayerState {
     /// `None` when `auth.disabled: true`.
     pub validator: Option<Arc<TokenValidator>>,
     pub policy: Arc<dyn Authorizer>,
+    /// Static service tokens, shared across mounts; empty when none configured.
+    pub service_tokens: Arc<ServiceTokens>,
 }
 
 impl AuthLayerState {
@@ -75,12 +135,42 @@ pub async fn require_auth(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let principal = match &st.validator {
-        None => Principal::anonymous(),
-        Some(validator) => {
-            let token = match bearer(&req) {
-                Ok(Some(t)) => t.to_string(),
-                Ok(None) => {
+    // A malformed `Authorization` header is rejected whenever authentication is
+    // in force; in fully-open mode (no validator and no service tokens) it is
+    // ignored, as before.
+    let has_auth = st.validator.is_some() || !st.service_tokens.is_empty();
+    let bearer_token: Option<String> = match bearer(&req).map(|o| o.map(str::to_string)) {
+        Ok(t) => t,
+        Err(()) if has_auth => {
+            audit::authn(
+                &st.server,
+                "reject",
+                None,
+                None,
+                "malformed authorization header",
+            );
+            return st.challenge(
+                StatusCode::UNAUTHORIZED,
+                Some(("invalid_request", "malformed Authorization header")),
+                "invalid_request",
+                "malformed Authorization header",
+            );
+        }
+        Err(()) => None,
+    };
+
+    // A static service token carries its own identity and is honoured in every
+    // auth mode; `resolve_user` then only applies to validated OAuth tokens.
+    let service_principal = bearer_token
+        .as_deref()
+        .and_then(|t| st.service_tokens.principal_for(t));
+
+    let (mut principal, resolve_user) = match service_principal {
+        Some(p) => (p, false),
+        None => match &st.validator {
+            None => (Principal::anonymous(), true),
+            Some(validator) => {
+                let Some(token) = bearer_token else {
                     audit::authn(&st.server, "challenge", None, None, "no bearer token");
                     return st.challenge(
                         StatusCode::UNAUTHORIZED,
@@ -88,52 +178,38 @@ pub async fn require_auth(
                         "unauthorized",
                         "bearer token required",
                     );
-                }
-                Err(()) => {
-                    audit::authn(
-                        &st.server,
-                        "reject",
-                        None,
-                        None,
-                        "malformed authorization header",
-                    );
-                    return st.challenge(
-                        StatusCode::UNAUTHORIZED,
-                        Some(("invalid_request", "malformed Authorization header")),
-                        "invalid_request",
-                        "malformed Authorization header",
-                    );
-                }
-            };
-            match validator.validate(&token, &st.resource).await {
-                Ok(p) => p,
-                Err(e) if e.is_server_side() => {
-                    tracing::error!(server = %st.server, error = %e, "token validation unavailable; failing closed");
-                    audit::authn(&st.server, "unavailable", None, None, &e.to_string());
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        axum::Json(serde_json::json!({"error": "temporarily_unavailable", "error_description": "token validation unavailable"})),
-                    )
-                        .into_response();
-                }
-                Err(e) => {
-                    audit::authn(&st.server, "reject", None, None, &e.to_string());
-                    // Do not echo claim contents back; the category is enough for clients.
-                    return st.challenge(
-                        StatusCode::UNAUTHORIZED,
-                        Some(("invalid_token", "token is not valid for this resource")),
-                        "invalid_token",
-                        "token is not valid for this resource",
-                    );
+                };
+                match validator.validate(&token, &st.resource).await {
+                    Ok(p) => (p, true),
+                    Err(e) if e.is_server_side() => {
+                        tracing::error!(server = %st.server, error = %e, "token validation unavailable; failing closed");
+                        audit::authn(&st.server, "unavailable", None, None, &e.to_string());
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(serde_json::json!({"error": "temporarily_unavailable", "error_description": "token validation unavailable"})),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        audit::authn(&st.server, "reject", None, None, &e.to_string());
+                        // Do not echo claim contents back; the category is enough for clients.
+                        return st.challenge(
+                            StatusCode::UNAUTHORIZED,
+                            Some(("invalid_token", "token is not valid for this resource")),
+                            "invalid_token",
+                            "token is not valid for this resource",
+                        );
+                    }
                 }
             }
-        }
+        },
     };
 
-    let mut principal = principal;
-    principal.user = st
-        .policy
-        .resolve_user(&principal.subject, principal.email.as_deref());
+    if resolve_user {
+        principal.user = st
+            .policy
+            .resolve_user(&principal.subject, principal.email.as_deref());
+    }
 
     match st.policy.authorize_server(&principal, &st.server) {
         Decision::Allow { reason } => {
@@ -173,4 +249,37 @@ pub async fn require_auth(
 
     req.extensions_mut().insert(principal);
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_token_resolves_to_its_identity() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "ci".to_string(),
+            ServiceToken {
+                token: "secret".into(),
+                user: "ci-bot".into(),
+                scopes: vec!["omg:use".into()],
+            },
+        );
+        let st = ServiceTokens::from_config(&map);
+        assert!(!st.is_empty());
+
+        let p = st.principal_for("secret").expect("matching token");
+        assert_eq!(p.subject, "service|ci");
+        assert_eq!(p.user.as_deref(), Some("ci-bot"));
+        assert_eq!(p.scopes, vec!["omg:use".to_string()]);
+
+        assert!(st.principal_for("wrong").is_none());
+    }
+
+    #[test]
+    fn empty_when_unconfigured() {
+        assert!(ServiceTokens::from_config(&BTreeMap::new()).is_empty());
+        assert!(ServiceTokens::default().principal_for("anything").is_none());
+    }
 }

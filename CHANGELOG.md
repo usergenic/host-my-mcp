@@ -4,6 +4,19 @@ All notable changes to `host-my-mcp` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor bump may break).
 
+## [0.6.0] - 2026-11-08
+
+### Added
+- **Static service tokens for non-interactive clients.** Declare long-lived
+  bearer tokens under `auth.service_tokens` for services that cannot run the
+  OAuth flow (CI, scripts). Each maps an opaque secret to a `user` (and optional
+  `scopes`); a request sending `Authorization: Bearer <token>` is authorized as
+  that user through the ordinary `allowed_users` and per-tool policy, skipping
+  the authorization-code dance. Tokens are compared by hash and never logged,
+  work in every auth mode (built-in, external issuer, or `disabled`), and are
+  revoked by removing the entry and restarting. The `user` needs no `users`
+  entry — the token self-declares its identity (`service|<name>`).
+
 ## [0.5.0] - 2026-11-06
 
 ### Fixed
